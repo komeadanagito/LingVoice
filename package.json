@@ -1,0 +1,65 @@
+{
+  "name": "lingvoice-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "另一声",
+  "main": "dist/src/main/index.js",
+  "scripts": {
+    "start": "npm run build && electron .",
+    "dev": "npm run build:electron && concurrently -k -s first \"vite\" \"wait-on http://localhost:45173 && cross-env LINGVOICE_DEV=1 electron .\"",
+    "web": "vite --open",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run check && npm run build:electron && vite build",
+    "test": "tsx --test test/*.test.ts",
+    "test:desktop": "npm run build && electron dist/scripts/smoke.js",
+    "check": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.renderer.json",
+    "icon": "npm run build:electron && electron dist/scripts/create-icon.js",
+    "dist": "npm run build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/noto-sans-sc": "^5.3.1",
+    "@gsap/react": "^2.1.2",
+    "ffmpeg-static": "^5.2.0",
+    "gsap": "^3.15.0",
+    "i18next": "^25.10.10",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-i18next": "^16.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.0.0",
+    "cross-env": "^10.0.0",
+    "electron": "^42.0.0",
+    "electron-builder": "^26.0.12",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0",
+    "wait-on": "^9.0.0"
+  },
+  "build": {
+    "appId": "com.lingvoice.downloader",
+    "productName": "LingVoice",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/src/**/*",
+      "dist/renderer/**/*",
+      "icon/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/ffmpeg.exe"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "icon/lingvoice-logo.ico",
+      "artifactName": "LingVoice-${version}.exe"
+    }
+  }
+}

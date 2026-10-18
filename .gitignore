@@ -1,0 +1,15 @@
+node_modules/
+dist/
+release/
+artifacts/
+*.log
+*.part
+*.ytdl
+cookies*.txt
+.env
+.env.*
+!.env.example
+.cache/
+video/
+*.pem
+*.key

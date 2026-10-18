@@ -1,0 +1,15 @@
+.header-actions { display: flex; align-items: center; gap: 18px; }
+.language-switcher { display: flex; align-items: center; gap: 10px; }
+.language-switcher label { font-size: 13px; color: #1b3644; white-space: nowrap; font-weight: 500; }
+.task-line { display: flex; align-items: center; flex-wrap: wrap; }
+.task-copy { min-width: 160px; }
+.cookie-row { flex-wrap: wrap; }
+.cookie-row p { overflow-wrap: anywhere; }
+html[lang="en"] .brand strong { letter-spacing: 0; }
+@media (max-width: 980px) {
+  .header-actions { gap: 10px; }
+  .language-switcher label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .section-title { flex-wrap: wrap; }
+  .subtle { margin-left: 0; }
+  html[lang="en"] .section-title .subtle { flex-basis: 100%; margin-left: 32px; }
+}
