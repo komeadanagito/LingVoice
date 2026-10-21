@@ -122,7 +122,6 @@ export class AsrService {
     if (!record(update)) throw new Error('Invalid ASR configuration.');
     const validated = settings(update.settings);
     if (this.providers) {
-      if (Object.hasOwn(update, 'apiKey')) throw new Error('Manage credentials in Providers.');
       if (validated.providerId) await this.providers.resolve(validated.providerId, 'asr');
     }
     const key = Object.hasOwn(update, 'apiKey') ? text(update.apiKey, 'ASR API key', 8192, true) : undefined;
@@ -186,11 +185,19 @@ export class AsrService {
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, UPLOAD_TIMEOUT);
     try {
       const adapter = provider?.adapter.asr ?? fallbackAsrAdapter;
-      const request = adapter.build(provider?.context ?? { baseUrl: config.baseUrl, apiKey: key }, { ...config, wav: pcmWav(pcm) });
+      const context = provider ? { ...provider.context, apiKey: key || provider.context.apiKey } : { baseUrl: config.baseUrl, apiKey: key };
+      const request = adapter.build(context, { ...config, wav: pcmWav(pcm) });
       const response = await (this.dependencies.fetch ?? fetch)(request.url, {
         ...request.init, signal: controller.signal, redirect: 'error',
       });
-      if (!response.ok || Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) { await response.body?.cancel(); throw new Error(); }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`HTTP ${response.status}`);
+      }
+      if (Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error('size limit');
+      }
       const reader = response.body?.getReader();
       if (!reader) throw new Error();
       const decoder = new TextDecoder();
@@ -201,19 +208,59 @@ export class AsrService {
           const chunk = await reader.read();
           if (chunk.done) break;
           bytes += chunk.value.byteLength;
-          if (bytes > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error(); }
+          if (bytes > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error('size limit'); }
           body += decoder.decode(chunk.value, { stream: true });
         }
         body += decoder.decode();
       } finally { reader.releaseLock(); }
       this.check(signal);
       return JSON.parse(body) as unknown;
-    } catch {
+    } catch (err) {
       controller.abort();
       if (signal.aborted) throw new Error('ASR cancelled.');
       if (timedOut) throw new Error('ASR upload timed out.');
+      const httpMatch = err instanceof Error && /^HTTP (\d+)/.exec(err.message);
+      if (httpMatch) {
+        const code = Number(httpMatch[1]);
+        if (code === 404) {
+          throw new Error('ASR provider request failed (HTTP 404 Not Found): 当前接口未提供 /audio/transcriptions 语音转写服务。请注意：阿里云百炼 / DashScope 兼容模式未开放 Whisper 转写接口，推荐在设置中配置支持 Whisper 兼容协议的服务（如 OpenAI、Groq、SiliconFlow 硅基流动等）。');
+        }
+        if (code === 401 || code === 403) {
+          throw new Error(`ASR provider request failed (HTTP ${code}): 身份验证失败，请检查 API Key 或模型权限。`);
+        }
+        throw new Error(`ASR provider request failed (HTTP ${code}). Check the URL, credentials, model and provider availability.`);
+      }
+      if (err instanceof Error && err.message === 'size limit') {
+        throw new Error('ASR provider request failed: response size exceeded the limit.');
+      }
       throw new Error('ASR provider request failed. Check the URL, credentials, model and provider availability.');
     } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
+  }
+
+  async test(): Promise<void> {
+    if (this.busy) throw new Error('ASR is already busy.');
+    await this.pending;
+    const state = await this.load();
+    if (!state.settings.providerId && !state.settings.baseUrl) {
+      throw new Error('未配置语音识别接口地址，请在设置中填写 Base URL 或选择 Provider。');
+    }
+    const provider = this.providers && state.settings.providerId ? await this.providers.resolve(state.settings.providerId, 'asr') : undefined;
+    let key = '';
+    try {
+      if (state.apiKey) key = text(this.vault.decrypt(state.apiKey), 'ASR credential', 8192, true);
+      else if (provider) key = provider.context.apiKey;
+    } catch {
+      throw new Error('Unable to decrypt ASR credentials. Save the key again.');
+    }
+
+    const controller = new AbortController();
+    const pcm = new Uint8Array(32000);
+    const view = new DataView(pcm.buffer);
+    for (let index = 0; index < 16000; index++) view.setInt16(index * 2, Math.round(Math.sin(index * 2 * Math.PI * 440 / 16000) * 10000), true);
+
+    const response = await this.upload(state.settings, key, pcm, controller.signal, provider);
+    const parsed = provider ? provider.adapter.asr!.parse(response) : fallbackAsrAdapter.parse(response);
+    parseAsrSegments(parsed, 1, 0);
   }
 
   async transcribe(request: AsrRequest): Promise<AsrCue[]> {
@@ -232,9 +279,12 @@ export class AsrService {
       if (!regular) throw new Error('The local media path must be an existing regular file.');
       await this.pending;
       const state = await this.load();
-      const provider = this.providers ? await this.providers.resolve(state.settings.providerId || '', 'asr') : undefined;
+      const provider = this.providers && state.settings.providerId ? await this.providers.resolve(state.settings.providerId, 'asr') : undefined;
       let key = '';
-      try { if (!provider && state.apiKey) key = text(this.vault.decrypt(state.apiKey), 'ASR credential', 8192); }
+      try {
+        if (state.apiKey) key = text(this.vault.decrypt(state.apiKey), 'ASR credential', 8192, true);
+        else if (provider) key = provider.context.apiKey;
+      }
       catch { throw new Error('Unable to decrypt ASR credentials. Save the key again.'); }
       this.check(run.signal);
       temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-asr-'));
@@ -264,7 +314,8 @@ export class AsrService {
           }
           const response = await this.upload(state.settings, key, pcm, run.signal, provider);
           this.check(run.signal);
-          const segments = parseAsrSegments(provider ? provider.adapter.asr!.parse(response) : response, length / BYTES_PER_SECOND, offset / BYTES_PER_SECOND);
+          const parsed = provider ? provider.adapter.asr!.parse(response) : fallbackAsrAdapter.parse(response);
+          const segments = parseAsrSegments(parsed, length / BYTES_PER_SECOND, offset / BYTES_PER_SECOND);
           if (cues.length + segments.length > MAX_CUES) throw new Error('ASR result exceeds the subtitle count limit.');
           for (const cue of segments) cues.push(cue);
           this.progress({ stage: 'transcribing', completed: Math.floor(offset / CHUNK_BYTES) + 1, total });

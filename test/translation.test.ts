@@ -217,7 +217,7 @@ test('timeout aborts a pending provider request', async t => {
     }));
     const operation = service.translate({ texts: ['Hello'] });
     await ready;
-    t.mock.timers.tick(30000);
+    t.mock.timers.tick(600000);
     await assert.rejects(operation, /timed out/);
     t.mock.timers.reset();
   });

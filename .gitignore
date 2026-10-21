@@ -13,3 +13,5 @@ cookies*.txt
 video/
 *.pem
 *.key
+__pycache__/
+*.py[cod]

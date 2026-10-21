@@ -11,7 +11,7 @@ import {
 
 interface Vault { encrypt(value: string): string; decrypt(value: string): string }
 interface SavedConfig { settings: TranslationSettings; apiKey: string; machineKey: string }
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 600_000;
 const MAX_RESPONSE_BYTES = 2_000_000;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -92,7 +92,6 @@ export class TranslationService {
     if (!record(update)) throw new Error('Invalid translation configuration.');
     const validated = settings(update.settings);
     if (this.providers) {
-      if (Object.hasOwn(update, 'apiKey') || Object.hasOwn(update, 'machineKey')) throw new Error('Manage credentials in Providers.');
       if (validated.providerId) {
         const resolved = await this.providers.resolve(validated.providerId, 'translation');
         const protocols = resolved.adapter.info.translationOptions?.protocols;
@@ -133,12 +132,15 @@ export class TranslationService {
     catch { throw new Error('Unable to decrypt translation credentials. Save the key again.'); }
   }
 
-  private async request(address: string, init: RequestInit): Promise<unknown> {
+  private async request(address: string, init: RequestInit, externalSignal?: AbortSignal): Promise<unknown> {
+    externalSignal?.throwIfAborted();
     const controller = new AbortController();
+    const cancel = () => controller.abort();
+    externalSignal?.addEventListener('abort', cancel, { once: true });
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
       const response = await fetch(address, { ...init, signal: controller.signal, redirect: 'error' });
-      if (!response.ok) throw new Error();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const declared = Number(response.headers.get('content-length'));
       if (declared > MAX_RESPONSE_BYTES) throw new Error();
       // Bound actual streamed bytes too, even if content-length is absent or dishonest.
@@ -156,9 +158,13 @@ export class TranslationService {
       }
       body += decoder.decode();
       return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(controller.signal.aborted ? 'Translation request timed out.' : 'Translation provider request failed. Check the URL, credentials and provider availability.');
-    } finally { clearTimeout(timer); }
+    } catch (err) {
+      if (externalSignal?.aborted) throw new Error('Translation request cancelled.');
+      if (controller.signal.aborted) throw new Error('Translation request timed out.');
+      const httpMatch = err instanceof Error && /^HTTP (\d+)/.exec(err.message);
+      const detail = httpMatch ? ` (HTTP ${httpMatch[1]})` : '';
+      throw new Error(`Translation provider request failed${detail}. Check the URL, credentials and provider availability.`);
+    } finally { clearTimeout(timer); externalSignal?.removeEventListener('abort', cancel); }
   }
 
   async models(): Promise<string[]> {
@@ -167,7 +173,9 @@ export class TranslationService {
     if (this.providers) {
       const resolved = await this.providers.resolve(state.settings.providerId || '', 'models');
       const adapter = resolved.adapter.models!;
-      const request = adapter.build(resolved.context);
+      const customKey = state.apiKey ? this.secret(state.apiKey) : '';
+      const context = customKey ? { ...resolved.context, apiKey: customKey } : resolved.context;
+      const request = adapter.build(context);
       return adapter.parse(await this.request(request.url, request.init));
     }
     const adapter = legacyAdapters.get('openai-compatible').models!;
@@ -175,7 +183,9 @@ export class TranslationService {
     return adapter.parse(await this.request(request.url, request.init));
   }
 
-  async translate(request: TranslationRequest): Promise<string[]> {
+  async translate(request: TranslationRequest, signal?: AbortSignal, dubbingDurations?: number[]): Promise<string[]> {
+    signal?.throwIfAborted();
+    if (dubbingDurations && (!Array.isArray(request?.texts) || dubbingDurations.length !== request.texts.length || dubbingDurations.some(value => !Number.isFinite(value) || value <= 0))) throw new Error('Invalid dubbing durations.');
     if (!record(request) || Object.keys(request).some(key => key !== 'texts') || !Array.isArray(request.texts) || !request.texts.length || request.texts.length > 40) {
       throw new Error('Provide between 1 and 40 texts, without settings overrides.');
     }
@@ -193,14 +203,16 @@ export class TranslationService {
     if (this.providers) {
       const resolved = await this.providers.resolve(config.providerId || '', 'translation');
       const adapter = resolved.adapter.translation!;
-      const request = adapter.build(resolved.context, { ...config, texts });
-      return adapter.parse(await this.request(request.url, request.init), texts.length);
+      const customKey = state.apiKey ? this.secret(state.apiKey) : '';
+      const context = customKey ? { ...resolved.context, apiKey: customKey } : resolved.context;
+      const request = adapter.build(context, { ...config, texts, dubbingDurations });
+      return adapter.parse(await this.request(request.url, request.init, signal), texts.length);
     }
     // Compatibility for legacy configurations and standalone service callers.
     // Provider-managed application runs never select implementations here.
     const machine = config.engine === 'machine';
     const adapter = legacyAdapters.get(machine ? 'libretranslate' : 'openai-compatible').translation!;
-    const http = adapter.build({ baseUrl: machine ? config.machineUrl : config.baseUrl, apiKey: this.secret(machine ? state.machineKey : state.apiKey) }, { ...config, texts, fullUrl: machine ? false : config.fullUrl });
-    return adapter.parse(await this.request(http.url, http.init), texts.length);
+    const http = adapter.build({ baseUrl: machine ? config.machineUrl : config.baseUrl, apiKey: this.secret(machine ? state.machineKey : state.apiKey) }, { ...config, texts, dubbingDurations, fullUrl: machine ? false : config.fullUrl });
+    return adapter.parse(await this.request(http.url, http.init, signal), texts.length);
   }
 }

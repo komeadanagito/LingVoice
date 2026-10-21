@@ -15,6 +15,7 @@ const shapes = {
   volume: <><path d="m11 4-6 5H2v6h3l6 5ZM15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14" /></>,
   muted: <><path d="m11 4-6 5H2v6h3l6 5ZM16 9l6 6m0-6-6 6" /></>,
   fullscreen: <path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" />,
+  mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v3M8 21h8" /></>,
 } satisfies Record<string, ReactNode>;
 
 export function Icon({ name, size = 20 }: { name: keyof typeof shapes; size?: number }) {

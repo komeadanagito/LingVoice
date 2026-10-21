@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+import type { DubbingProgress } from '../shared/dubbing';
 import type { AsrProgress } from '../shared/asr';
 import type { DownloadEvent, IpcContract, IpcResult, LingVoiceApi } from '../shared/contracts';
 
@@ -9,14 +10,33 @@ function invoke<K extends keyof IpcContract>(
 }
 
 const api: LingVoiceApi = {
+  runtime: 'desktop',
+  dubbingConfig: () => invoke('dubbing:config'),
+  saveDubbingConfig: settings => invoke('dubbing:save', settings),
+  checkDubbing: () => invoke('dubbing:check'),
+  runDubbing: request => invoke('dubbing:run', request),
+  cancelDubbing: jobId => invoke('dubbing:cancel', jobId),
+  clearDubbingCache: () => invoke('dubbing:clear'),
+  deleteDubbingVoice: voiceId => invoke('dubbing:deleteVoice', voiceId),
+  onDubbingProgress: callback => {
+    const listener = (_event: IpcRendererEvent, data: DubbingProgress): void => callback(data);
+    ipcRenderer.on('dubbing:progress', listener);
+    return () => ipcRenderer.removeListener('dubbing:progress', listener);
+  },
   providers: () => invoke('providers:list'),
   saveProvider: update => invoke('providers:save', update),
+  providerModels: id => invoke('providers:models', id),
+  ttsConfig: () => invoke('tts:config'),
+  saveTtsConfig: update => invoke('tts:save', update),
+  generateSpeech: request => invoke('tts:generate', request),
+  cancelTts: () => invoke('tts:cancel'),
   removeProvider: id => invoke('providers:remove', id),
   localFilePath: file => webUtils.getPathForFile(file),
   asrConfig: () => invoke('asr:config'),
   saveAsrConfig: update => invoke('asr:save', update),
   transcribe: request => invoke('asr:run', request),
   cancelAsr: () => invoke('asr:cancel'),
+  testAsr: () => invoke('asr:test'),
   onAsrProgress: callback => {
     const listener = (_event: IpcRendererEvent, data: AsrProgress): void => callback(data);
     ipcRenderer.on('asr:progress', listener);

@@ -1,15 +1,29 @@
 import { useState, useRef, useEffect, type ChangeEvent, type DragEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n';
 import { filePathToMediaUrl } from '../utils/media';
 import { Icon } from './Icon';
 import { useSubtitleTrack } from './SubtitleTrack';
 
 interface Props {
+  subtitleToolsHost?: HTMLElement | null;
   initialFile?: string;
   initialEmbed?: string;
   initialTitle?: string;
   recentDownloadedFile?: string;
   recentDownloadedTitle?: string;
+}
+
+function asrFileReference(file = ''): string {
+  if (!file) return '';
+  // Web downloads are same-origin media handles, resolved only by the backend.
+  if (window.lingvoice.runtime === 'browser') {
+    try {
+      const url = new URL(file, location.href);
+      return url.origin === location.origin && url.pathname.startsWith('/api/lingvoice/media/') ? url.href : '';
+    } catch { return ''; }
+  }
+  return /^https?:/i.test(file) ? '' : file;
 }
 
 function formatTime(seconds: number): string {
@@ -24,7 +38,7 @@ function formatTime(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-export function VideoPlayer({ initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
+export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
   const { t } = useI18n();
   const [embedSrc, setEmbedSrc] = useState(initialEmbed);
   const [loading, setLoading] = useState(false);
@@ -40,8 +54,15 @@ export function VideoPlayer({ initialFile, initialEmbed = '', initialTitle, rece
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isDragging, setIsDragging] = useState(false);
 
-  const [localPath, setLocalPath] = useState(initialFile && !/^https?:/i.test(initialFile) ? initialFile : '');
-  const subtitles = useSubtitleTrack(videoSrc, embedSrc, currentTime, localPath);
+  const handleSeekTime = (time: number) => {
+    setCurrentTime(time);
+    if (videoRef.current) {
+      videoRef.current.currentTime = time;
+    }
+  };
+
+  const [localPath, setLocalPath] = useState(asrFileReference(initialFile));
+  const subtitles = useSubtitleTrack(videoSrc, embedSrc, currentTime, localPath, handleSeekTime);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,7 +72,7 @@ export function VideoPlayer({ initialFile, initialEmbed = '', initialTitle, rece
     setFailed(false);
     setLoading(Boolean(initialFile || initialEmbed));
     setVideoSrc(initialFile ? filePathToMediaUrl(initialFile) : '');
-    setLocalPath(initialFile && !/^https?:/i.test(initialFile) ? initialFile : '');
+    setLocalPath(asrFileReference(initialFile));
     setVideoTitle(initialTitle || '');
     setCurrentTime(0);
     setDuration(0);
@@ -174,7 +195,7 @@ export function VideoPlayer({ initialFile, initialEmbed = '', initialTitle, rece
       setFailed(false);
       setLoading(true);
       setVideoSrc(filePathToMediaUrl(recentDownloadedFile));
-      setLocalPath(/^https?:/i.test(recentDownloadedFile) ? '' : recentDownloadedFile);
+      setLocalPath(asrFileReference(recentDownloadedFile));
       setVideoTitle(recentDownloadedTitle || recentDownloadedFile.split(/[/\\]/).pop() || '');
       setCurrentTime(0); setDuration(0); setIsPlaying(false);
     }
@@ -206,7 +227,7 @@ export function VideoPlayer({ initialFile, initialEmbed = '', initialTitle, rece
         </div>
       </div>
 
-      {subtitles.toolbar}
+      {subtitleToolsHost && createPortal(subtitles.toolbar, subtitleToolsHost)}
       <div
         className={`player-viewport ${isDragging ? 'dragging' : ''} ${!videoSrc ? 'is-empty' : ''}`}
         onDragOver={handleDragOver}

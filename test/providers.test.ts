@@ -37,7 +37,7 @@ test('registry metadata is extensible, copied, and checked against handlers; dup
   assert.equal(registry.get('custom-vendor').info.name, 'Custom');
   const metadata = registry.list();
   metadata[0].capabilities.length = 0;
-  assert.equal(registry.get('openai-compatible').info.capabilities.length, 3);
+  assert.equal(registry.get('openai-compatible').info.capabilities.length, 4);
   assert.throws(() => registry.register(adapter), /already registered/);
   assert.throws(() => registry.get('missing'), /Unknown/);
   for (const bad of [
@@ -250,5 +250,65 @@ test('migration creates only existing legacy sources and records an empty first-
     const next = new ProviderService(file, vault);
     await next.importLegacy(files);
     assert.deepEqual((await next.list()).providers.map(item => item.id), ['legacy-asr']);
+  });
+});
+
+test('OpenAI speech builds mp3 requests and preserves exact full URL semantics', () => {
+  const adapter = createDefaultProviderRegistry().get('openai-compatible').tts!;
+  const input = { text: 'Hello', model: 'tts-1', voice: 'alloy', speed: 0.25, fullUrl: false };
+  const request = adapter.build(context, input);
+  assert.equal(request.url, 'https://example.com/proxy/v1/audio/speech');
+  assert.deepEqual(JSON.parse(request.init.body as string), { model: 'tts-1', input: 'Hello', voice: 'alloy', speed: 0.25, response_format: 'mp3' });
+  assert.equal(request.init.method, 'POST'); assert.equal(request.init.redirect, 'error');
+  assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', Authorization: 'Bearer private-key' });
+  const exact = 'https://example.com/custom/%61?api-version=2026';
+  assert.equal(adapter.build({ ...context, baseUrl: exact }, { ...input, fullUrl: true }).url, exact);
+  assert.equal(createDefaultProviderRegistry().get('openai-compatible').models!.build({ ...context, baseUrl: 'https://example.com/v1/audio/speech?version=1' }).url, 'https://example.com/v1/models?version=1');
+});
+
+test('generic model discovery uses the explicit saved provider and bounded JSON with sanitized failures', async t => {
+  await fixture(async service => {
+    const provider = await service.save({ ...update, apiKey: 'private-key' });
+    const fetchMock = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      assert.equal(url, 'https://example.com/proxy/v1/models');
+      assert.equal(init.redirect, 'error');
+      assert.deepEqual(init.headers, { Authorization: 'Bearer private-key' });
+      return Response.json({ data: [{ id: 'z' }, { id: 'a' }, { id: 'z' }] });
+    });
+    assert.deepEqual(await service.models(provider.id), ['a', 'z']);
+    for (const makeResponse of [
+      () => new Response('private-key', { status: 403 }),
+      () => new Response('private-key'),
+      () => Response.json({ data: [{ id: 'bad\nmodel' }] }),
+      () => new Response('{}', { headers: { 'content-length': String(2 * 1024 * 1024 + 1) } }),
+      () => new Response(new Uint8Array(2 * 1024 * 1024 + 1), { headers: { 'content-length': '1' } }),
+    ]) {
+      fetchMock.mock.mockImplementation(async () => makeResponse());
+      await assert.rejects(service.models(provider.id), error => error instanceof Error && /Unable to load provider models/.test(error.message) && !error.message.includes('private-key'));
+    }
+    fetchMock.mock.mockImplementation(async () => { throw new Error('private-key provider body'); });
+    await assert.rejects(service.models(provider.id), error => error instanceof Error && !error.message.includes('private-key'));
+    const incompatible = await service.save({ ...update, adapter: 'libretranslate' });
+    await assert.rejects(service.models(incompatible.id), /Unable to load provider models/);
+    await assert.rejects(service.models('missing'), /Unable to load provider models/);
+  });
+});
+
+test('generic model discovery times out at 30 seconds even when fetch ignores cancellation', async t => {
+  await fixture(async service => {
+    const provider = await service.save(update);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let signal: AbortSignal | undefined;
+    t.mock.method(globalThis, 'fetch', (_url: string, init: RequestInit) => {
+      signal = init.signal!; entered(); return new Promise<Response>(() => {});
+    });
+    const request = service.models(provider.id);
+    await started;
+    t.mock.timers.tick(29_999); assert.equal(signal!.aborted, false);
+    const rejection = assert.rejects(request, /timed out/);
+    t.mock.timers.tick(1); await rejection;
+    assert.equal(signal!.aborted, true);
   });
 });

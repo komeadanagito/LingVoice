@@ -70,40 +70,46 @@ app.whenReady().then(async () => {
     const sidebarState = () => window!.webContents.executeJavaScript(`({
       left: document.querySelector('.app-sidebar-toggle').getAttribute('aria-expanded') === 'true',
       right: document.querySelector('.app-right-sidebar-toggle').getAttribute('aria-expanded') === 'true',
-      empty: document.getElementById('right-sidebar').childElementCount === 0,
+      tools: !!document.querySelector('#right-sidebar .subtitle-toolbar'),
       hidden: document.getElementById('right-sidebar').getAttribute('aria-hidden') === 'true'
     })`);
-    assert.deepEqual(await sidebarState(), { left: true, right: false, empty: true, hidden: true });
+    assert.deepEqual(await sidebarState(), { left: true, right: false, tools: true, hidden: true });
     await window.webContents.executeJavaScript("document.querySelector('.app-right-sidebar-toggle').click()");
     await waitFor(window, "document.querySelector('.app-right-sidebar-toggle').getAttribute('aria-expanded') === 'true' && document.getElementById('right-sidebar').getBoundingClientRect().width >= 260");
-    assert.deepEqual(await sidebarState(), { left: false, right: true, empty: true, hidden: false });
+    assert.deepEqual(await sidebarState(), { left: false, right: true, tools: true, hidden: false });
     await window.webContents.executeJavaScript("document.querySelector('.app-sidebar-toggle').click()");
     await waitFor(window, "document.querySelector('.app-sidebar-toggle').getAttribute('aria-expanded') === 'true'");
-    assert.deepEqual(await sidebarState(), { left: true, right: false, empty: true, hidden: true });
+    assert.deepEqual(await sidebarState(), { left: true, right: false, tools: true, hidden: true });
     await window.webContents.executeJavaScript("document.querySelector('.app-right-sidebar-toggle').click()");
     await waitFor(window, "document.querySelector('.app-right-sidebar-toggle').getAttribute('aria-expanded') === 'true'");
     await window.webContents.executeJavaScript("document.querySelector('.app-right-sidebar-toggle').click()");
     await waitFor(window, "document.querySelector('.app-right-sidebar-toggle').getAttribute('aria-expanded') === 'false'");
-    assert.deepEqual(await sidebarState(), { left: false, right: false, empty: true, hidden: true });
+    assert.deepEqual(await sidebarState(), { left: false, right: false, tools: true, hidden: true });
     await window.webContents.executeJavaScript("document.querySelector('.app-sidebar-toggle').click()");
     await waitFor(window, "document.querySelector('.app-sidebar-toggle').getAttribute('aria-expanded') === 'true'");
-    console.log('PASS: mutually exclusive left/right sidebars, independent collapse and empty right panel.');
+    console.log('PASS: mutually exclusive left/right sidebars, independent collapse and right-panel subtitle tools.');
     const providerChecks = await window.webContents.executeJavaScript(`(async () => {
       const api = window.lingvoice;
       const created = await api.saveProvider({ name: 'IPC provider test', adapter: 'openai-compatible', baseUrl: 'https://provider.example/v1' });
       if (!created.ok) throw new Error(created.error);
-      const translation = await api.translationConfig(); const speech = await api.asrConfig();
-      if (!translation.ok || !speech.ok) throw new Error('Unable to load task settings');
+      const translation = await api.translationConfig(); const speech = await api.asrConfig(); const synthesis = await api.ttsConfig();
+      if (!translation.ok || !speech.ok || !synthesis.ok) throw new Error('Unable to load task settings');
       const savedTranslation = await api.saveTranslationConfig({ settings: { ...translation.data.settings, providerId: created.data.id } });
       const savedSpeech = await api.saveAsrConfig({ settings: { ...speech.data.settings, providerId: created.data.id } });
       const protectedRemoval = await api.removeProvider(created.data.id);
       const incompatibleChange = await api.saveProvider({ ...created.data, adapter: 'libretranslate' });
       await api.saveTranslationConfig({ settings: { ...translation.data.settings, providerId: '' } });
       await api.saveAsrConfig({ settings: { ...speech.data.settings, providerId: '' } });
+      const savedTts = await api.saveTtsConfig({ settings: { ...synthesis.data.settings, providerId: created.data.id } });
+      const ttsProtectedRemoval = await api.removeProvider(created.data.id);
+      const ttsIncompatibleChange = await api.saveProvider({ ...created.data, adapter: 'libretranslate' });
+      const invalidTts = await api.generateSpeech({ text: '' });
+      await api.cancelTts();
+      await api.saveTtsConfig({ settings: { ...synthesis.data.settings, providerId: '' } });
       const removed = await api.removeProvider(created.data.id);
-      return { savedTranslation: savedTranslation.ok, savedSpeech: savedSpeech.ok, protectedRemoval: !protectedRemoval.ok, incompatibleChange: !incompatibleChange.ok, removed: removed.ok, secretExposed: 'apiKey' in created.data };
+      return { savedTranslation: savedTranslation.ok, savedSpeech: savedSpeech.ok, protectedRemoval: !protectedRemoval.ok, incompatibleChange: !incompatibleChange.ok, savedTts: savedTts.ok, ttsProtectedRemoval: !ttsProtectedRemoval.ok, ttsIncompatibleChange: !ttsIncompatibleChange.ok, invalidTts: !invalidTts.ok, removed: removed.ok, secretExposed: 'apiKey' in created.data };
     })()`);
-    assert.deepEqual(providerChecks, { savedTranslation: true, savedSpeech: true, protectedRemoval: true, incompatibleChange: true, removed: true, secretExposed: false });
+    assert.deepEqual(providerChecks, { savedTranslation: true, savedSpeech: true, protectedRemoval: true, incompatibleChange: true, savedTts: true, ttsProtectedRemoval: true, ttsIncompatibleChange: true, invalidTts: true, removed: true, secretExposed: false });
     console.log('PASS: real provider IPC, shared task bindings, deletion/capability guards and credential redaction.');
     const screenshot = await window.webContents.capturePage().catch(() => null);
     const artifacts = path.resolve(__dirname, '../../artifacts');
@@ -156,9 +162,45 @@ app.whenReady().then(async () => {
     // Exercise translation settings and subtitle playback without contacting any provider.
     await fixture.webContents.executeJavaScript("document.querySelector('.sidebar-settings').click()");
     await waitFor(fixture, "!!document.querySelector('.translation-fields') && !document.querySelector('.translation-fields').disabled");
-    assert.equal(await fixture.webContents.executeJavaScript("document.querySelectorAll('.settings-section').length"), 4);
+    assert.equal(await fixture.webContents.executeJavaScript("document.querySelectorAll('.settings-section').length"), 5);
     await fixture.webContents.executeJavaScript("document.querySelector('.translation-save').click()");
-    await waitFor(fixture, "document.querySelector('.settings-notice')?.textContent.includes('Settings saved')");
+    await waitFor(fixture, "document.querySelector('.translation-section .settings-notice')?.textContent.includes('Settings saved')");
+    await fixture.webContents.executeJavaScript("document.querySelector('.translation-test').click()");
+    await waitFor(fixture, "document.querySelector('.translation-test-feedback')?.textContent.includes('Hello, welcome')");
+    assert.equal(await fixture.webContents.executeJavaScript("!!document.querySelector('.translation-section .translation-test-feedback') && !document.querySelector('.settings-page > .services-feedback')"), true);
+    await fixture.webContents.executeJavaScript("document.querySelector('.translation-section .fetch-models').click()");
+    await waitFor(fixture, "!!document.querySelector('select#asr-model') && !!document.querySelector('select#tts-model')");
+    assert.deepEqual(await fixture.webContents.executeJavaScript(`({
+      translation: document.getElementById('translation-model').value,
+      asr: document.getElementById('asr-model').value,
+      tts: document.getElementById('tts-model').value,
+      sourceAuto: document.getElementById('translation-source-language').value,
+      audioAuto: document.getElementById('asr-language').value,
+      terminologyRemoved: !document.querySelector('.asr-section').textContent.includes('Terminology')
+    })`), { translation: 'test-model', asr: 'whisper-1', tts: 'tts-1', sourceAuto: 'auto', audioAuto: '', terminologyRemoved: true });
+    await fixture.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('.tts-text-field textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'Offline speech test');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(fixture, "!document.querySelector('.tts-generate').disabled");
+    await fixture.webContents.executeJavaScript("document.querySelector('.tts-generate').click()");
+    await waitFor(fixture, "!!document.querySelector('.tts-audio-result audio')");
+    assert.equal(await fixture.webContents.executeJavaScript("document.querySelector('.tts-download').download"), 'speech.mp3');
+    const speechDownload = new Promise<void>((resolve, reject) => {
+      fixture.webContents.session.once('will-download', (_event, item) => {
+        item.setSavePath(path.join(userData, 'desktop-speech.mp3'));
+        item.once('done', (_event, state) => state === 'completed' ? resolve() : reject(new Error(`Desktop audio download: ${state}`)));
+      });
+    });
+    await fixture.webContents.executeJavaScript("document.querySelector('.tts-download').click()");
+    await speechDownload;
+    assert.equal((await fs.readFile(path.join(userData, 'desktop-speech.mp3'))).toString('base64'), 'SUQzBAAAAAAA');
+    await fixture.webContents.executeJavaScript("document.querySelector('.tts-generate').click()");
+    await waitFor(fixture, "!!document.querySelector('.tts-cancel')");
+    await fixture.webContents.executeJavaScript("document.querySelector('.tts-cancel').click()");
+    await waitFor(fixture, "document.querySelector('.tts-feedback')?.textContent.includes('cancelled')");
+    console.log('PASS: task-local translation feedback, shared provider model results, language selects and desktop TTS preview/cancellation.');
     fixture.showInactive();
     await pause(250); // A visible window is needed for a fresh compositor frame.
     const settingsScreenshot = await fixture.webContents.capturePage();
@@ -187,17 +229,17 @@ app.whenReady().then(async () => {
     await fixture.webContents.executeJavaScript("document.querySelector('.subtitle-toolbar .primary').click()");
     await waitFor(fixture, "document.querySelector('.subtitle-translation')?.textContent.includes('译文：Hello world')");
     await fixture.webContents.executeJavaScript(`(() => {
-      const select = document.querySelector('.subtitle-toolbar select');
+      const select = document.querySelector('#right-sidebar .subtitle-select select');
       select.value = 'translated'; select.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await waitFor(fixture, "!!document.querySelector('.subtitle-translation') && !document.querySelector('.subtitle-original')");
     await fixture.webContents.executeJavaScript(`(() => {
-      const select = document.querySelector('.subtitle-toolbar select');
+      const select = document.querySelector('#right-sidebar .subtitle-select select');
       select.value = 'off'; select.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await waitFor(fixture, "!document.querySelector('.subtitle-overlay')");
     await fixture.webContents.executeJavaScript(`(() => {
-      const select = document.querySelector('.subtitle-toolbar select');
+      const select = document.querySelector('#right-sidebar .subtitle-select select');
       select.value = 'original'; select.dispatchEvent(new Event('change', { bubbles: true }));
       document.querySelector('.asr-start').click();
     })()`);

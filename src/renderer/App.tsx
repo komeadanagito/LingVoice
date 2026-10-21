@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { DownloadCard } from './components/DownloadCard';
 import { VideoPlayer } from './components/VideoPlayer';
@@ -7,6 +7,7 @@ import { ServicesSettings } from './components/ServicesSettings';
 import { Icon } from './components/Icon';
 import { videoEmbedUrl } from './utils/embed';
 import { useDownloader } from './hooks/useDownloader';
+import { useRightSidebarAnimation } from './hooks/useRightSidebarAnimation';
 import { useI18n } from './i18n';
 import '../styles.css';
 import './i18n.css';
@@ -17,9 +18,12 @@ export function App() {
   const [openSidebar, setOpenSidebar] = useState<'left' | 'right' | null>('left');
   const sidebarCollapsed = openSidebar !== 'left';
   const rightSidebarOpen = openSidebar === 'right';
+  const rightSidebarRef = useRef<HTMLElement>(null);
+  useRightSidebarAnimation(rightSidebarRef, rightSidebarOpen);
   const [page, setPage] = useState<'download' | 'settings'>('download');
   const [playerFile, setPlayerFile] = useState('');
   const [playerTitle, setPlayerTitle] = useState('');
+  const [subtitleToolsHost, setSubtitleToolsHost] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -85,6 +89,7 @@ export function App() {
 
           <div className="main-content" hidden={page !== 'download'}>
             <VideoPlayer
+              subtitleToolsHost={subtitleToolsHost}
               initialFile={playerFile}
               initialEmbed={controller.video && !playerFile ? videoEmbedUrl(controller.url, controller.video.id) : ''}
               initialTitle={playerTitle || videoTitle}
@@ -108,12 +113,15 @@ export function App() {
         </main>
       </div>
       <aside
+        ref={rightSidebarRef}
         id="right-sidebar"
         className={`right-sidebar${rightSidebarOpen ? '' : ' collapsed'}`}
         aria-label={t('nav.rightSidebar')}
         aria-hidden={!rightSidebarOpen}
         inert={!rightSidebarOpen}
-      />
+      >
+        <div className="right-sidebar-tools" ref={setSubtitleToolsHost} hidden={page !== 'download'} />
+      </aside>
     </div>
   );
 }

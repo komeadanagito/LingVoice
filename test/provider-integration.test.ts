@@ -57,9 +57,11 @@ test('translation and ASR execute a registered custom adapter using the same pro
     assert.deepEqual(await asr.transcribe({ file: media }), [{ id: 1, start: 0, end: 1, text: 'Hello' }]);
     assert.deepEqual(requests, ['https://custom.example/translate-custom', 'https://custom.example/speech-custom']);
     await assert.rejects(translation.models(), /capability/);
-    await assert.rejects(translation.saveConfig({ settings: { ...defaultTranslationSettings, providerId: provider.id }, apiKey: 'other' }), /Providers/);
-    await assert.rejects(asr.saveConfig({ settings: { ...defaultAsrSettings, providerId: provider.id }, apiKey: 'other' }), /Providers/);
+    await translation.saveConfig({ settings: { ...defaultTranslationSettings, providerId: provider.id, protocol: 'custom-protocol' }, apiKey: 'trans-custom-key' });
+    assert.equal((await translation.getConfig()).hasApiKey, true);
+    await asr.saveConfig({ settings: { ...defaultAsrSettings, providerId: provider.id }, apiKey: 'asr-custom-key' });
+    assert.equal((await asr.getConfig()).hasApiKey, true);
     const disk = await fs.readFile(path.join(directory, 'translation.json'), 'utf8');
-    assert.ok(!disk.includes('shared-secret'));
+    assert.ok(!disk.includes('shared-secret') && !disk.includes('trans-custom-key'));
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });

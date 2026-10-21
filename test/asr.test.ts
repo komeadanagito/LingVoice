@@ -357,3 +357,37 @@ test('invalid timestamp response stops later chunks and cleans up', async t => {
     assert.equal(calls, 1);
   });
 });
+
+test('service.test validates provider ASR endpoint and catches 404 with helpful guidance', async t => {
+  mockFetch(t, () => segments());
+  await fixture(async ({ service }) => {
+    await service.saveConfig({ settings: settings({ providerId: 'test-prov' }), apiKey: 'test-key' });
+    await service.test();
+  });
+
+  t.mock.method(globalThis, 'fetch', async () => new Response('Not Found', { status: 404 }));
+  await fixture(async ({ service }) => {
+    await service.saveConfig({ settings: settings({ providerId: 'test-prov' }), apiKey: 'test-key' });
+    await assert.rejects(service.test(), /HTTP 404 Not Found/);
+  });
+});
+
+test('service.test and transcribe work with custom Base URL without a providerId', async t => {
+  let requestedUrl = '';
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+    requestedUrl = String(url);
+    return Response.json(segments('Custom ASR'));
+  });
+  await fixture(async ({ service, media }) => {
+    await service.saveConfig({
+      settings: settings({ providerId: '', baseUrl: 'https://custom-asr.example/v1', model: 'custom-whisper' }),
+      apiKey: 'custom-secret',
+    });
+    await service.test();
+    assert.equal(requestedUrl, 'https://custom-asr.example/v1/audio/transcriptions');
+
+    const cues = await service.transcribe({ file: media });
+    assert.equal(cues[0].text, 'Custom ASR');
+  });
+});
+

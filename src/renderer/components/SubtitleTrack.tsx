@@ -1,10 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { activeSubtitles, exportSubtitles, parseSubtitles, subtitleBatches, type SubtitleCue } from '../utils/subtitles';
+import { Select, type SelectOption } from './Select';
+import { DubbingPanel } from './DubbingPanel';
+
+function formatTimestamp(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
 
 type Mode = 'bilingual' | 'original' | 'translated' | 'off';
 
-export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime: number, localPath: string) {
+export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime: number, localPath: string, onSeek?: (time: number) => void) {
   const { locale } = useI18n();
   const zh = locale === 'zh-CN';
   const [cues, setCues] = useState<SubtitleCue[]>([]);
@@ -15,11 +29,33 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
   const [error, setError] = useState('');
   const [offset, setOffset] = useState(0);
   const [fontSize, setFontSize] = useState(22);
+  const [search, setSearch] = useState('');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const listRef = useRef<HTMLDivElement>(null);
   const generation = useRef(0);
   const running = useRef(false);
   const recognizing = useRef(false);
   const [confirmAsr, setConfirmAsr] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+
+  const effectiveTime = currentTime - offset;
+  const activeCue = cues.find(cue => cue.start <= effectiveTime && effectiveTime < cue.end);
+  const activeCueId = activeCue?.id;
+
+  useEffect(() => {
+    if (!autoScroll || !activeCueId || !listRef.current) return;
+    const element = listRef.current.querySelector<HTMLElement>(`[data-cue-id="${activeCueId}"]`);
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [activeCueId, autoScroll]);
+
+  const filteredCues = search.trim()
+    ? cues.filter(cue =>
+        cue.text.toLowerCase().includes(search.toLowerCase()) ||
+        (cue.translated && cue.translated.toLowerCase().includes(search.toLowerCase()))
+      )
+    : cues;
   useEffect(() => {
     generation.current++; running.current = false;
     setCues([]); setName(''); setError(''); setProgress(''); setBusy(false); setOffset(0); setConfirmAsr(false);
@@ -44,7 +80,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       const config = await window.lingvoice.asrConfig();
       if (token !== generation.current) return;
       if (!config.ok) throw new Error(config.error);
-      if (!config.data.settings.providerId) throw new Error(zh ? '请先在设置中添加 Provider，并保存语音识别绑定。' : 'Add a provider in Settings and save the speech recognition binding first.');
+      if (!config.data.settings.providerId && !config.data.settings.baseUrl) throw new Error(zh ? '请先在设置中填写语音识别 Base URL 或选择 Provider。' : 'Configure speech recognition Base URL or select a Provider in Settings first.');
       const result = await window.lingvoice.transcribe({ file: localPath });
       if (token !== generation.current) return;
       if (!result.ok) throw new Error(result.error);
@@ -108,6 +144,17 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${name.replace(/\.(srt|vtt)$/i, '')}.${mode === 'off' ? 'bilingual' : mode}.srt`; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  const modeOptions: SelectOption[] = [
+    { value: 'bilingual', label: zh ? '双语字幕' : 'Bilingual' },
+    { value: 'translated', label: zh ? '仅译文' : 'Translation only' },
+    { value: 'original', label: zh ? '仅原文' : 'Original only' },
+    { value: 'off', label: zh ? '关闭字幕' : 'Off' },
+  ];
+  const fontOptions: SelectOption[] = [18, 22, 26, 30].map(size => ({
+    value: String(size),
+    label: `${size}px`,
+  }));
+
   const enabled = Boolean(videoSrc && !embedSrc);
   const active = mode === 'off' ? [] : activeSubtitles(cues, currentTime - offset);
   const toolbar = <div className="subtitle-workspace">
@@ -116,17 +163,116 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       <button type="button" className="choose-file-button" disabled={!enabled || busy} onClick={() => input.current?.click()}>{zh ? '导入字幕' : 'Import subtitles'}</button>
       <button type="button" className="choose-file-button asr-start" disabled={!enabled || !localPath || busy} onClick={() => setConfirmAsr(value => !value)}>{zh ? '识别音频' : 'Transcribe audio'}</button>
       {busy && <button type="button" className="text-button subtitle-stop" onClick={stop}>{zh ? '停止' : 'Stop'}</button>}
-      <select aria-label={zh ? '字幕显示模式' : 'Subtitle display mode'} value={mode} onChange={event => setMode(event.target.value as Mode)}><option value="bilingual">{zh ? '双语字幕' : 'Bilingual'}</option><option value="translated">{zh ? '仅译文' : 'Translation only'}</option><option value="original">{zh ? '仅原文' : 'Original only'}</option><option value="off">{zh ? '关闭字幕' : 'Off'}</option></select>
+      <Select
+        value={mode}
+        options={modeOptions}
+        onChange={val => setMode(val as Mode)}
+        className="subtitle-select"
+        aria-label={zh ? '字幕显示模式' : 'Subtitle display mode'}
+      />
+      <DubbingPanel file={localPath} cues={cues} offset={offset} disabled={busy || !enabled} sourceKey={videoSrc} />
       {cues.length > 0 && <>
         <button type="button" className="primary" disabled={busy} onClick={() => void translate()}>{zh ? '翻译字幕' : 'Translate'}</button>
         <button type="button" className="text-button" onClick={download}>{zh ? '导出 SRT' : 'Export SRT'}</button>
         <label className="subtitle-offset">{zh ? '延迟' : 'Delay'}<input type="number" min={-60} max={60} step={0.1} value={offset} onChange={event => { const value = Number(event.target.value); setOffset(Number.isFinite(value) ? Math.max(-60, Math.min(60, value)) : 0); }} />s</label>
-        <select aria-label={zh ? '字幕字号' : 'Subtitle font size'} value={fontSize} onChange={event => setFontSize(Number(event.target.value))}>{[18, 22, 26, 30].map(size => <option key={size} value={size}>{size}px</option>)}</select>
+        <Select
+          value={String(fontSize)}
+          options={fontOptions}
+          onChange={val => setFontSize(Number(val))}
+          className="subtitle-select subtitle-size-select"
+          aria-label={zh ? '字幕字号' : 'Subtitle font size'}
+        />
       </>}
     </div>
-    {confirmAsr && <div className="asr-consent" role="group" aria-label={zh ? '确认音频上传' : 'Confirm audio upload'}><span>{zh ? '将提取并上传当前视频的音频到 ASR Provider，可能产生费用。完成后替换当前字幕，继续吗？' : 'Audio from this video will be uploaded to your ASR provider and may incur charges. The result will replace current subtitles. Continue?'}</span><button type="button" className="primary asr-confirm" disabled={busy} onClick={() => void recognize()}>{zh ? '确认并识别' : 'Confirm and transcribe'}</button><button type="button" className="text-button" onClick={() => setConfirmAsr(false)}>{zh ? '取消' : 'Cancel'}</button></div>}
-    <p className="subtitle-hint">{embedSrc ? (zh ? '在线内嵌播放暂不支持字幕同步，请下载后播放。' : 'Embedded online playback cannot sync subtitles. Download and play locally.') : name ? `${name} · ${cues.length} ${zh ? '条字幕' : 'cues'}` : (zh ? 'SRT / VTT · 导入字幕或识别本地视频音频；在设置中配置 Provider、翻译和 ASR。' : 'SRT / VTT · Import subtitles or transcribe local video audio. Configure providers, translation and ASR in Settings.')}</p>
+    {confirmAsr && <div className="asr-consent" role="group" aria-label={zh ? '确认音频上传' : 'Confirm audio upload'}><span>{window.lingvoice.runtime === 'browser' ? (zh ? '当前视频将上传到本机 Web 后端，提取的音频再发送至 ASR Provider，可能产生费用。临时视频会在任务结束后删除，识别结果将替换当前字幕。继续吗？' : 'This video will be uploaded to the local Web backend, then extracted audio will be sent to your ASR provider and may incur charges. Temporary media is deleted after the task. The result replaces current subtitles. Continue?') : (zh ? '将提取并上传当前视频的音频到 ASR Provider，可能产生费用。完成后替换当前字幕，继续吗？' : 'Audio from this video will be uploaded to your ASR provider and may incur charges. The result will replace current subtitles. Continue?')}</span><button type="button" className="primary asr-confirm" disabled={busy} onClick={() => void recognize()}>{zh ? '确认并识别' : 'Confirm and transcribe'}</button><button type="button" className="text-button" onClick={() => setConfirmAsr(false)}>{zh ? '取消' : 'Cancel'}</button></div>}
+    {name && <p className="subtitle-hint">{`${name} · ${cues.length} ${zh ? '条字幕' : 'cues'}`}</p>}
     {progress && <p className="subtitle-hint" role="status">{progress}</p>}{error && <p className="settings-error" role="alert">{error}</p>}
+    <div className="subtitle-transcript-panel" aria-label={zh ? '翻译时间戳窗口' : 'Transcript window'}>
+      {cues.length > 5 && (
+        <div className="transcript-search-box">
+          <svg className="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder={zh ? '搜索台词或译文…' : 'Search transcript…'}
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="transcript-search-input"
+          />
+          {search && (
+            <button type="button" className="transcript-search-clear" onClick={() => setSearch('')} aria-label={zh ? '清空搜索' : 'Clear search'}>
+              ×
+            </button>
+          )}
+        </div>
+      )}
+
+      {cues.length === 0 ? (
+        <div className="transcript-empty-state">
+          <div className="transcript-empty-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              <path d="M8 9h8" />
+              <path d="M8 13h5" />
+            </svg>
+          </div>
+        </div>
+      ) : filteredCues.length === 0 ? (
+        <div className="transcript-empty-state">
+          <div className="transcript-empty-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+          </div>
+        </div>
+      ) : (
+        <div className="transcript-list" ref={listRef} role="feed" aria-label={zh ? '台词列表' : 'Transcript list'}>
+          {filteredCues.map(cue => {
+            const isActive = cue.id === activeCueId;
+            return (
+              <div
+                key={cue.id}
+                data-cue-id={cue.id}
+                className={`transcript-cue-item${isActive ? ' is-active' : ''}`}
+                onClick={() => onSeek?.(cue.start + offset)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSeek?.(cue.start + offset);
+                  }
+                }}
+              >
+                <div className="transcript-cue-top">
+                  <span
+                    className="transcript-time-badge"
+                    title={zh ? '点击跳转到此时间点' : 'Click to seek to timestamp'}
+                  >
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    <span>{formatTimestamp(cue.start + offset)} - {formatTimestamp(cue.end + offset)}</span>
+                  </span>
+                  <span className="transcript-cue-num">#{cue.id}</span>
+                </div>
+                {mode !== 'original' && cue.translated && (
+                  <div className="transcript-cue-translation">{cue.translated}</div>
+                )}
+                {(mode !== 'translated' || !cue.translated) && (
+                  <div className={`transcript-cue-text${mode === 'bilingual' && cue.translated ? ' is-secondary' : ''}`}>
+                    {cue.text}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   </div>;
   const overlay = active.length > 0 && <div className="subtitle-overlay" style={{ fontSize }}>
     {active.map(cue => <div className="subtitle-cue" key={cue.id}>
@@ -134,5 +280,5 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       {(mode !== 'translated' || !cue.translated) && <div className={mode === 'bilingual' && cue.translated ? 'subtitle-original secondary' : 'subtitle-original'}><span>{cue.text}</span></div>}
     </div>)}
   </div>;
-  return { toolbar, overlay };
+  return { toolbar, overlay, cues, offset, snapshot: { cues, offset, file: localPath, sourceKey: videoSrc } };
 }

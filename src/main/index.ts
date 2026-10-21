@@ -1,5 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } from 'electron';
 import { TranslationService } from './translation';
+import { TtsService } from './tts';
+import { DubbingService } from './dubbing';
 import { AsrService } from './asr';
 import { ProviderService } from './providers';
 import { mediaResponse } from './media';
@@ -34,6 +36,8 @@ export function getVideoDirectory(): string {
 
 let window: BrowserWindow | undefined;
 let downloader: Downloader | undefined;
+let ttsService: TtsService | undefined;
+let dubbingService: DubbingService | undefined;
 let asrService: AsrService | undefined;
 let settings: Settings | undefined;
 let systemLocale: Locale = defaultLocale;
@@ -85,7 +89,7 @@ async function createWindow(): Promise<void> {
   });
   downloader = manager;
   const mainWindow = new BrowserWindow({
-    width: 1130, height: 850, minWidth: 880, minHeight: 740,
+    width: 1130, height: 850, minWidth: 640, minHeight: 480,
     title: t('app.title'), backgroundColor: '#f6f8f7', autoHideMenuBar: true,
     icon: path.resolve(__dirname, '../../../icon/lingvoice-logo.png'),
     webPreferences: {
@@ -113,19 +117,36 @@ async function createWindow(): Promise<void> {
   handle('providers:list', () => providers.list());
   handle('providers:save', async update => {
     if (update?.id) {
-      const [catalog, translationConfig, asrConfig] = await Promise.all([providers.list(), translation.getConfig(), asr.getConfig()]);
+      const [catalog, translationConfig, asrConfig, ttsConfig] = await Promise.all([providers.list(), translation.getConfig(), asr.getConfig(), tts.getConfig()]);
       const adapter = catalog.adapters.find(adapter => adapter.id === update.adapter);
       if (translationConfig.settings.providerId === update.id && !adapter?.capabilities.includes('translation')) throw new Error('该 Provider 正被字幕翻译使用，需要支持翻译能力。 / Provider is bound to translation.');
+      if (ttsConfig.settings.providerId === update.id && !adapter?.capabilities.includes('tts')) throw new Error('该 Provider 正被 TTS 使用，需要支持文字转语音能力。 / Provider is bound to TTS.');
       if (asrConfig.settings.providerId === update.id && !adapter?.capabilities.includes('asr')) throw new Error('该 Provider 正被 ASR 使用，需要支持语音识别能力。 / Provider is bound to ASR.');
     }
     return providers.save(update);
   });
   handle('providers:remove', async id => {
-    const [translationConfig, asrConfig] = await Promise.all([translation.getConfig(), asr.getConfig()]);
-    if (translationConfig.settings.providerId === id || asrConfig.settings.providerId === id) throw new Error('该 Provider 正在被使用，请先修改翻译/ASR 绑定。 / Provider is in use. Change task bindings first.');
+    const [translationConfig, asrConfig, ttsConfig] = await Promise.all([translation.getConfig(), asr.getConfig(), tts.getConfig()]);
+    if (translationConfig.settings.providerId === id || asrConfig.settings.providerId === id || ttsConfig.settings.providerId === id) throw new Error('该 Provider 正在被使用，请先修改翻译/ASR/TTS 绑定。 / Provider is in use. Change task bindings first.');
     await providers.remove(id);
   });
   const translation = new TranslationService(path.join(app.getPath('userData'), 'translation.json'), vault, providers);
+  const tts = new TtsService(path.join(app.getPath('userData'), 'tts.json'), providers, vault);
+  ttsService = tts;
+  const dubbing = new DubbingService({
+    directory: path.join(app.getPath('userData'), 'dubbing'), ffmpegPath,
+    helperPath: app.isPackaged ? path.join(process.resourcesPath, 'audio-separation.py') : path.resolve(__dirname, '../../../scripts/audio-separation.py'),
+    tts, translation,
+    emit: progress => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('dubbing:progress', progress); },
+  });
+  dubbingService = dubbing;
+  handle('dubbing:config', () => dubbing.getConfig());
+  handle('dubbing:save', settings => dubbing.saveConfig(settings));
+  handle('dubbing:check', () => dubbing.check());
+  handle('dubbing:run', request => dubbing.run(request));
+  handle('dubbing:cancel', jobId => { if (typeof jobId !== 'string') throw new Error('Invalid dubbing job.'); dubbing.cancel(jobId); });
+  handle('dubbing:clear', () => dubbing.clearCache());
+  handle('dubbing:deleteVoice', voiceId => dubbing.deleteVoice(voiceId));
   const asr = new AsrService(path.join(app.getPath('userData'), 'asr.json'), vault, ffmpegPath, progress => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('asr:progress', progress);
   }, {}, providers);
@@ -134,6 +155,12 @@ async function createWindow(): Promise<void> {
   handle('asr:save', update => asr.saveConfig(update));
   handle('asr:run', request => asr.transcribe(request));
   handle('asr:cancel', () => asr.cancel());
+  handle('asr:test', () => asr.test());
+  handle('providers:models', id => providers.models(id));
+  handle('tts:config', () => tts.getConfig());
+  handle('tts:save', update => tts.saveConfig(update));
+  handle('tts:generate', request => tts.generate(request));
+  handle('tts:cancel', () => tts.cancel());
   handle('translation:config', () => translation.getConfig());
   handle('translation:save', update => translation.saveConfig(update));
   handle('translation:models', () => translation.models());
@@ -194,13 +221,13 @@ async function createWindow(): Promise<void> {
   handle('video:cancel', () => manager.cancel());
   handle('video:reveal', () => { if (lastFile) shell.showItemInFolder(lastFile); });
   mainWindow.on('close', event => {
-    if (!manager.busy && !asr.busy) return;
+    if (!manager.busy && !asr.busy && !tts.busy && !dubbing.busy) return;
     const choice = dialog.showMessageBoxSync(mainWindow, {
       type: 'question', buttons: [t('dialog.keepRunning'), t('dialog.exit')], defaultId: 0, cancelId: 0,
       title: t('dialog.busyTitle'), message: t('dialog.exitMessage'),
       detail: t('dialog.exitDetail'),
     });
-    if (choice === 0) event.preventDefault(); else { manager.cancel(); asr.cancel(); }
+    if (choice === 0) event.preventDefault(); else { manager.cancel(); asr.cancel(); tts.cancel(); dubbing.cancel(); }
   });
   if (devUrl) await mainWindow.loadURL(devUrl);
   else await mainWindow.loadFile(rendererFile);
@@ -217,5 +244,5 @@ else {
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { downloader?.cancel(); asrService?.cancel(); });
+  app.on('before-quit', () => { downloader?.cancel(); asrService?.cancel(); ttsService?.cancel(); dubbingService?.cancel(); });
 }

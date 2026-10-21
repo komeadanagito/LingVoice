@@ -21,7 +21,7 @@ export async function mediaResponse(request: Request): Promise<Response> {
   try {
     const info = await stat(file);
     if (!info.isFile()) return new Response(null, { status: 404 });
-    const types: Record<string, string> = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo' };
+    const types: Record<string, string> = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.srt': 'application/x-subrip; charset=utf-8' };
     const headers = new Headers({ 'Content-Type': types[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Accept-Ranges': 'bytes' });
     const rangeHeader = request.headers.get('range');
     const range = rangeHeader ? byteRange(rangeHeader, info.size) : null;

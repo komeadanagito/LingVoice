@@ -1,4 +1,4 @@
-export type ProviderCapability = 'translation' | 'asr' | 'models';
+export type ProviderCapability = 'translation' | 'asr' | 'tts' | 'models';
 
 export interface Provider {
   id: string;

@@ -38,7 +38,7 @@ export function subtitleBatches(cues: SubtitleCue[]): SubtitleCue[][] {
   let length = 0;
   for (const cue of cues) {
     if (cue.text.length > 20000) throw new Error('A subtitle cue exceeds the translation limit');
-    if (batch.length && (batch.length >= 30 || length + cue.text.length > 16000)) {
+    if (batch.length && (batch.length >= 15 || length + cue.text.length > 8000)) {
       batches.push(batch); batch = []; length = 0;
     }
     batch.push(cue); length += cue.text.length;
