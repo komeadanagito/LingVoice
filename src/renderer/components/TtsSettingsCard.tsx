@@ -132,8 +132,8 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
         aria-controls="tts-section-body"
       >
         <div>
-          <h3 id="tts-settings-title">{zh ? '文字转语音 · TTS' : 'Text to speech · TTS'}</h3>
-          <p>{zh ? '使用 OpenAI 兼容语音接口；可用模型、音色与费用以服务商为准。' : 'Uses the OpenAI-compatible speech API. Models, voices and pricing depend on your provider.'}</p>
+          <h3 id="tts-settings-title">{zh ? '视频配音服务 · TTS' : 'Video dubbing · TTS'}</h3>
+          <p>{zh ? '配置视频配音所使用的云端语音合成服务商（Provider）、模型与授权密钥。' : 'Configure the cloud provider, model and API key used for video dubbing.'}</p>
         </div>
         <svg className="section-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m6 9 6 6 6-6" />
@@ -141,20 +141,20 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
       </button>
     </div>
     <div id="tts-section-body" className="settings-section-body">
-      <p className="settings-hint">{zh ? '视频配音复用此处保存的 Provider 和 API Key，可选择 qwen-audio-3.1-tts-plus 或 qwen-audio-3.0-tts-plus；此处模型仍只用于普通文字转语音。' : 'Video dubbing reuses the provider and API key saved here (supporting qwen-audio-3.1-tts-plus or qwen-audio-3.0-tts-plus). The model selected here remains for ordinary text to speech only.'}</p>
+      <p className="settings-hint">{zh ? '此处配置专门服务于视频配音（推荐使用 qwen-audio-3.0-tts-plus 或 qwen-audio-3.1-tts-plus）。配音语速由视频台词时间轴自动精准对齐，无需在此设置固定语速。' : 'Configures cloud speech synthesis specifically for video dubbing (recommended models: qwen-audio-3.0-tts-plus or qwen-audio-3.1-tts-plus). Speech tempo is automatically aligned to video timestamps.'}</p>
       <fieldset className="translation-fields" disabled={blocked}>
         <div className="settings-form-grid">
           <label>Provider<Select id="tts-provider" value={settings.providerId} options={[{ value: '', label: zh ? '请选择 Provider' : 'Choose a provider' }, ...options]} onChange={providerId => { setSettings(previous => ({ ...previous, providerId })); setFeedback(null); }} /></label>
-          <label>{zh ? '合成模型' : 'Speech model'}<ModelPicker id="tts-model" providerId={settings.providerId} value={settings.model} onChange={model => setSettings(previous => ({ ...previous, model }))} entry={models.entries[settings.providerId]} onFetch={() => void models.fetchModels(settings.providerId)} supportsModels={!!adapter?.capabilities.includes('models')} placeholder="tts-1" zh={zh} disabled={blocked} /></label>
+          <label>{zh ? '配音模型' : 'Dubbing model'}<ModelPicker id="tts-model" providerId={settings.providerId} value={settings.model} onChange={model => setSettings(previous => ({ ...previous, model }))} entry={models.entries[settings.providerId]} onFetch={() => void models.fetchModels(settings.providerId)} supportsModels={!!adapter?.capabilities.includes('models')} placeholder="qwen-audio-3.0-tts-plus" zh={zh} disabled={blocked} /></label>
           <label>
-            {zh ? '音色' : 'Voice'}
+            {zh ? '默认音色' : 'Default voice'}
             {customVoice ? (
               <div className="model-input">
                 <input
                   aria-label={zh ? '克隆 / 自定义音色 ID' : 'Cloned / Custom voice ID'}
                   value={settings.voice}
                   onChange={event => setSettings(previous => ({ ...previous, voice: event.target.value }))}
-                  placeholder={zh ? '输入克隆音色 ID 或服务商音色' : 'Enter cloned voice ID or provider voice'}
+                  placeholder={zh ? '输入克隆音色 ID 或服务商音色（例如 cherry）' : 'Enter cloned voice ID or provider voice'}
                   autoFocus
                 />
                 <button
@@ -186,7 +186,6 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
               />
             )}
           </label>
-          <label>{zh ? '语速' : 'Speed'}<input aria-label={zh ? '语速' : 'Speed'} type="number" min="0.25" max="4" step="0.05" value={settings.speed} onChange={event => setSettings(previous => ({ ...previous, speed: Number(event.target.value) }))} /></label>
           <label>{zh ? '独立 API Key（可选）' : 'Custom API Key (optional)'}
             <div className="secret-input">
               <input
@@ -204,16 +203,16 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
           </label>
           <label className="checkbox-field"><input type="checkbox" checked={settings.fullUrl} onChange={event => setSettings(previous => ({ ...previous, fullUrl: event.target.checked }))} />{zh ? 'Provider 地址是完整请求地址' : 'Provider URL is a complete endpoint'}</label>
         </div>
-        <label className="tts-text-field">{zh ? '合成文本' : 'Text to synthesize'}<textarea aria-label={zh ? '合成文本' : 'Text to synthesize'} maxLength={4096} value={text} onChange={event => setText(event.target.value)} placeholder={zh ? '输入要转换为语音的文字…' : 'Enter text to convert to speech…'} /><span className="settings-hint">{text.length}/4096</span></label>
+        <label className="tts-text-field">{zh ? '测试连通性文本' : 'Connectivity test text'}<textarea aria-label={zh ? '合成文本' : 'Text to synthesize'} maxLength={4096} value={text} onChange={event => setText(event.target.value)} placeholder={zh ? '输入测试文字以验证配音服务商连通性…' : 'Enter test text to verify dubbing provider connectivity…'} /><span className="settings-hint">{text.length}/4096</span></label>
         <div className="settings-actions">
-          <button className="primary tts-save" type="button" onClick={() => void saveOnly()}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存语音合成设置' : 'Save speech settings')}</button>
-          <button className="choose-file-button tts-generate" type="button" disabled={!settings.providerId || !text.trim()} onClick={() => void generate()}>{generating ? (zh ? '生成中…' : 'Generating…') : (zh ? '生成语音（使用额度）' : 'Generate speech (uses quota)')}</button>
+          <button className="primary tts-save" type="button" onClick={() => void saveOnly()}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存配音设置' : 'Save dubbing settings')}</button>
+          <button className="choose-file-button tts-generate" type="button" disabled={!settings.providerId || !text.trim()} onClick={() => void generate()}>{generating ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试配音连接' : 'Test dubbing connection')}</button>
           {hasKey && <button className="text-button" type="button" onClick={() => void clearKey()}>{zh ? '清除独立密钥' : 'Clear custom key'}</button>}
         </div>
       </fieldset>
-      {generating && <button className="cancel-button tts-cancel" type="button" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? (zh ? '取消中…' : 'Cancelling…') : (zh ? '取消生成' : 'Cancel generation')}</button>}
+      {generating && <button className="cancel-button tts-cancel" type="button" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? (zh ? '取消中…' : 'Cancelling…') : (zh ? '取消测试' : 'Cancel test')}</button>}
       {feedback && <p className={`tts-feedback ${feedback.error ? 'settings-error' : 'settings-notice'}`} role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
-      {audio && <div className="tts-audio-result"><audio controls src={audio.url} aria-label={zh ? '合成语音试听' : 'Generated speech preview'} /><a className="text-button tts-download" href={audio.url} download={audio.fileName}>{zh ? '下载 MP3' : 'Download MP3'}</a></div>}
+      {audio && <div className="tts-audio-result"><audio controls src={audio.url} aria-label={zh ? '合成语音试听' : 'Generated speech preview'} /><a className="text-button tts-download" href={audio.url} download={audio.fileName}>{zh ? '下载测试音频' : 'Download test audio'}</a></div>}
     </div>
   </section>;
 }
