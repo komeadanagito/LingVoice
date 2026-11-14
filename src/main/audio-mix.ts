@@ -34,6 +34,33 @@ export function buildAudioTimeline(segments: readonly AudioSegment[], duration: 
   return pieces;
 }
 
+/** Writes a sample-accurate 48 kHz stereo 16-bit PCM silent WAV file directly without spawning FFmpeg. */
+async function writeSilentWav(filePath: string, frames: number): Promise<void> {
+  const bytesPerFrame = 4; // 2 channels * 16-bit
+  const dataBytes = frames * bytesPerFrame;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(Math.min(0xffffffff, 36 + dataBytes), 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(2, 22); // 2 channels (stereo)
+  header.writeUInt32LE(48000, 24); // 48 kHz
+  header.writeUInt32LE(48000 * bytesPerFrame, 28);
+  header.writeUInt16LE(bytesPerFrame, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(Math.min(0xffffffff, dataBytes), 40);
+  const handle = await fs.open(filePath, 'w', 0o600);
+  try {
+    await handle.write(header, 0, 44, 0);
+    await handle.truncate(44 + dataBytes);
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Input segments must be the canonical WAV files returned by alignAudio. Output is a new MKV file. */
 export async function mixDubbedVideo(request: AudioMixRequest, options: AudioOptions): Promise<{ outputPath: string; duration: number }> {
   if (path.extname(request.outputPath).toLowerCase() !== '.mkv') throw new Error('Dubbed video output must use .mkv for video stream-copy compatibility.');
@@ -53,7 +80,7 @@ export async function mixDubbedVideo(request: AudioMixRequest, options: AudioOpt
         // Copy into private staging: safe relative concat names and no source-file mutation race.
         await fs.copyFile(input, target);
       } else {
-        await runAudioProcess(options.ffmpegPath, [...ffmpegBase, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-af', `atrim=end_sample=${piece.frames}`, '-c:a', 'pcm_s16le', '-rf64', 'auto', target], options);
+        await writeSilentWav(target, piece.frames);
       }
       lines.push(`file '${name}'`);
     }
@@ -64,7 +91,16 @@ export async function mixDubbedVideo(request: AudioMixRequest, options: AudioOpt
     const totalFrames = Math.round(request.duration * 48000);
     assertDuration((await readWavInfo(timeline)).duration, totalFrames / 48000, 1 / 48000);
     const filter = path.join(directory, 'mix.filter');
-    await fs.writeFile(filter, `[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=${backgroundGain}[bg];\n[1:a]volume=${dialogueGain}[voice];\n[bg][voice]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0:latency=1,apad=whole_len=${totalFrames},atrim=end_sample=${totalFrames},asetpts=PTS-STARTPTS[mix]\n`);
+    const useDucking = request.segments.length > 0 && backgroundGain > 0 && dialogueGain > 0;
+    const filterScript = useDucking
+      ? `[0:a]aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo,volume=${backgroundGain}[bg];\n` +
+        `[1:a]highpass=f=80,aformat=sample_fmts=s16:channel_layouts=stereo,volume=${dialogueGain},asplit=2[voice][sc];\n` +
+        `[bg][sc]sidechaincompress=threshold=0.03:ratio=4:attack=25:release=300:makeup=1[bg_ducked];\n` +
+        `[bg_ducked][voice]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0:latency=1,apad=whole_len=${totalFrames},atrim=end_sample=${totalFrames},asetpts=PTS-STARTPTS[mix]\n`
+      : `[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=${backgroundGain}[bg];\n` +
+        `[1:a]volume=${dialogueGain}[voice];\n` +
+        `[bg][voice]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0:latency=1,apad=whole_len=${totalFrames},atrim=end_sample=${totalFrames},asetpts=PTS-STARTPTS[mix]\n`;
+    await fs.writeFile(filter, filterScript);
     const mixed = path.join(directory, 'mixed.wav');
     await runAudioProcess(options.ffmpegPath, [...ffmpegBase, '-i', background, '-i', timeline, '-filter_complex_script', filter, '-map', '[mix]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-rf64', 'auto', mixed], options);
     assertDuration((await readWavInfo(mixed)).duration, totalFrames / 48000, 1 / 48000);

@@ -1,11 +1,18 @@
-import { useState, useRef, useEffect, type ChangeEvent, type DragEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, type ChangeEvent, type DragEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n';
 import { filePathToMediaUrl } from '../utils/media';
 import { Icon } from './Icon';
 import { useSubtitleTrack } from './SubtitleTrack';
+import type { SavedSubtitles } from '../utils/task-history';
 
 interface Props {
+  taskId?: string;
+  mediaFile?: File;
+  savedSubtitles?: SavedSubtitles;
+  onSaveSubtitles?: (id: string, snapshot: SavedSubtitles) => void;
+  onOpenFile?: (file: File) => void;
+  onOpenRecent?: (file: string, title: string) => void;
   subtitleToolsHost?: HTMLElement | null;
   initialFile?: string;
   initialEmbed?: string;
@@ -38,7 +45,7 @@ function formatTime(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
+export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles, onOpenFile, onOpenRecent, subtitleToolsHost, initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
   const { t } = useI18n();
   const [embedSrc, setEmbedSrc] = useState(initialEmbed);
   const [loading, setLoading] = useState(false);
@@ -62,12 +69,25 @@ export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '',
   };
 
   const [localPath, setLocalPath] = useState(asrFileReference(initialFile));
-  const subtitles = useSubtitleTrack(videoSrc, embedSrc, currentTime, localPath, handleSeekTime);
+  const saveSubtitles = useCallback((snapshot: SavedSubtitles) => {
+    if (taskId) onSaveSubtitles?.(taskId, snapshot);
+  }, [taskId, onSaveSubtitles]);
+  const subtitles = useSubtitleTrack(videoSrc, embedSrc, currentTime, localPath, handleSeekTime, savedSubtitles, saveSubtitles, taskId);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (mediaFile) {
+      const url = URL.createObjectURL(mediaFile);
+      setEmbedSrc('');
+      setFailed(false);
+      setLoading(true);
+      setVideoSrc(url);
+      try { setLocalPath(window.lingvoice.localFilePath(mediaFile)); } catch { setLocalPath(''); }
+      setVideoTitle(initialTitle || mediaFile.name);
+      return () => URL.revokeObjectURL(url);
+    }
     setEmbedSrc(initialEmbed);
     setFailed(false);
     setLoading(Boolean(initialFile || initialEmbed));
@@ -77,7 +97,7 @@ export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '',
     setCurrentTime(0);
     setDuration(0);
     setIsPlaying(false);
-  }, [initialFile, initialEmbed]);
+  }, [initialFile, initialEmbed, mediaFile]);
 
   useEffect(() => { setVideoTitle(initialTitle || ''); }, [initialTitle]);
   useEffect(() => () => { if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); }, []);
@@ -152,6 +172,7 @@ export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '',
   };
 
   const handleFileSelect = (file: File) => {
+    if (onOpenFile) { onOpenFile(file); return; }
     if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
     const url = URL.createObjectURL(file);
     objectUrl.current = url;
@@ -191,6 +212,7 @@ export function VideoPlayer({ subtitleToolsHost, initialFile, initialEmbed = '',
 
   const loadRecentDownload = () => {
     if (recentDownloadedFile) {
+      if (onOpenRecent) { onOpenRecent(recentDownloadedFile, recentDownloadedTitle || ''); return; }
       setEmbedSrc('');
       setFailed(false);
       setLoading(true);

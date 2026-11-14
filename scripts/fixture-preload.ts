@@ -5,6 +5,7 @@ import type { Locale } from '../src/shared/i18n/catalog';
 import type { TranslationSettings } from '../src/shared/translation';
 import type { AsrSettings, AsrProgress } from '../src/shared/asr';
 import type { TtsSettings } from '../src/shared/tts';
+import type { HistoryTask } from '../src/shared/history';
 import type { Provider } from '../src/shared/providers';
 
 // Sandboxed preloads cannot require application modules at runtime.
@@ -19,14 +20,20 @@ let cancelled = false;
 let locale: Locale = 'zh-CN';
 const providers: Provider[] = [{ id: 'fixture-provider', name: 'Offline provider', adapter: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', hasApiKey: false }];
 const asrListeners = new Set<(progress: AsrProgress) => void>();
-let asrSettings: AsrSettings = { providerId: 'fixture-provider', baseUrl: 'https://api.openai.com/v1', fullUrl: false, model: 'whisper-1', language: '', prompt: '' };
+let asrSettings: AsrSettings = { providerId: 'fixture-provider', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', fullUrl: false, model: 'qwen-audio-3.1-asr-flash', language: '', prompt: '' };
 let asrCancelled = false;
-let ttsSettings: TtsSettings = { providerId: 'fixture-provider', model: 'tts-1', voice: 'alloy', speed: 1, fullUrl: false };
+let ttsSettings: TtsSettings = { providerId: 'fixture-provider', baseUrl: '', model: 'qwen-audio-3.1-tts-plus', voice: 'alloy', speed: 1, fullUrl: false };
 let ttsCancelled = false;
 let ttsHasKey = false;
 let asrHasKey = false;
 let translationHasKey = false;
+const taskHistory = new Map<string, HistoryTask>();
+let activeTask = '';
 const api: LingVoiceApi = {
+  history: async () => ({ ok: true, data: { tasks: [...taskHistory.values()], activeId: activeTask } }),
+  saveHistoryTask: async task => { taskHistory.set(task.id, task); return { ok: true, data: undefined }; },
+  deleteHistoryTask: async id => { taskHistory.delete(id); if (activeTask === id) activeTask = ''; return { ok: true, data: undefined }; },
+  selectHistoryTask: async id => { activeTask = id; return { ok: true, data: undefined }; },
   dubbingConfig: async () => ({ ok: true, data: { model: 'qwen-audio-3.1-tts-plus', settings: { pythonPath: 'python', modelFile: '', baseUrl: '', model: 'qwen-audio-3.1-tts-plus' } } }),
   saveDubbingConfig: async settings => ({ ok: true, data: { model: 'qwen-audio-3.1-tts-plus', settings } }),
   checkDubbing: async () => ({ ok: true, data: { ready: false, message: 'Offline fixture: configure a local separation model.' } }),
@@ -41,7 +48,7 @@ const api: LingVoiceApi = {
   ] } }),
   saveProvider: async update => { const value = { id: update.id || `fixture-${providers.length}`, name: update.name, adapter: update.adapter, baseUrl: update.baseUrl, hasApiKey: Boolean(update.apiKey) }; const index = providers.findIndex(provider => provider.id === value.id); if (index < 0) providers.push(value); else providers[index] = value; return { ok: true, data: value }; },
   removeProvider: async id => { const index = providers.findIndex(provider => provider.id === id); if (index >= 0) providers.splice(index, 1); return { ok: true, data: undefined }; },
-  providerModels: async () => { await new Promise(resolve => setTimeout(resolve, 50)); return { ok: true, data: ['test-model', 'whisper-1', 'tts-1'] }; },
+  providerModels: async () => { await new Promise(resolve => setTimeout(resolve, 50)); return { ok: true, data: ['test-model', 'qwen-audio-3.1-asr-flash', 'tts-1'] }; },
   ttsConfig: async () => ({ ok: true, data: { settings: ttsSettings, hasApiKey: ttsHasKey } }),
   saveTtsConfig: async update => { ttsSettings = { ...update.settings }; if (update.apiKey !== undefined) ttsHasKey = Boolean(update.apiKey); return { ok: true, data: { settings: ttsSettings, hasApiKey: ttsHasKey } }; },
   generateSpeech: async () => {
@@ -52,7 +59,7 @@ const api: LingVoiceApi = {
   cancelTts: async () => { ttsCancelled = true; return { ok: true, data: undefined }; },
   localFilePath: () => 'C:\\Downloads\\local-test.mp4',
   asrConfig: async () => ({ ok: true, data: { settings: asrSettings, hasApiKey: asrHasKey } }),
-  saveAsrConfig: async update => { asrSettings = update.settings; if (update.apiKey !== undefined) asrHasKey = Boolean(update.apiKey); return { ok: true, data: { settings: asrSettings, hasApiKey: asrHasKey } }; },
+  saveAsrConfig: async update => { asrSettings = { ...update.settings, fullUrl: false }; if (update.apiKey !== undefined) asrHasKey = Boolean(update.apiKey); return { ok: true, data: { settings: asrSettings, hasApiKey: asrHasKey } }; },
   transcribe: async () => { asrCancelled = false; for (const listener of asrListeners) listener({ stage: 'transcribing', completed: 0, total: 1 }); await new Promise(resolve => setTimeout(resolve, 100)); return asrCancelled ? { ok: false, error: 'ASR cancelled.' } : { ok: true, data: [{ id: 1, start: 0, end: 5, text: 'Recognized speech' }] }; },
   cancelAsr: async () => { asrCancelled = true; return { ok: true, data: undefined }; },
   testAsr: async () => ({ ok: true, data: undefined }),
@@ -61,6 +68,8 @@ const api: LingVoiceApi = {
   saveTranslationConfig: async update => { if (update.apiKey !== undefined) translationHasKey = Boolean(update.apiKey); return { ok: true, data: { settings: update.settings, hasApiKey: translationHasKey, hasMachineKey: Boolean(update.machineKey) } }; },
   translationModels: async () => ({ ok: true, data: ['test-model'] }),
   translateSubtitles: async request => ({ ok: true, data: request.texts.map(text => `译文：${text}`) }),
+  summarizeTranslation: async request => ({ ok: true, data: request.memory }),
+  reviewTranslation: async () => ({ ok: true, data: [] }),
   state: async () => ({ ok: true, data: { folder: 'C:\\Downloads\\LingVoice', version: 'test', locale } }),
   setLocale: async value => { locale = value; return { ok: true, data: locale }; },
   chooseFolder: async () => ({ ok: true, data: 'C:\\Downloads\\Selected' }),

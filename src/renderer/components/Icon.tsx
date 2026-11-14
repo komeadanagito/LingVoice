@@ -4,6 +4,7 @@ const shapes = {
   addTask: <><path d="M12 21a9 9 0 1 0-9-9c0 1.48.36 2.88 1 4.12L3 21l4.88-1c1.24.64 2.64 1 4.12 1Z" /><path d="M12 8.5v7M8.5 12h7" /></>,
   sidebar: <><rect x="3" y="4" width="18" height="16" rx="4" /><path d="M8 7v10" /></>,
   message: <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-7l-5 3v-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />,
+  history: <><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7" /><path d="M12 7v5l3 2" /></>,
   settings: <><path d="M12 3.5 19.36 7.75v8.5L12 20.5 4.64 16.25v-8.5Z" /><circle cx="12" cy="12" r="3.2" /></>,
   download: <><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4" /></>,
   play: <path d="m9 5 11 7-11 7Z" />,

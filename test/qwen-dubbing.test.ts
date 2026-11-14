@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import https from 'node:https';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import { QwenDubbingClient, QWEN_DUBBING_MODEL, type QwenDubbingOptions, type QwenVoice } from '../src/main/qwen-dubbing';
+import { normalizeQwenDubbingBaseUrl, QwenDubbingClient, QWEN_DUBBING_MODEL, type QwenDubbingOptions, type QwenVoice } from '../src/main/qwen-dubbing';
 
 const baseUrl = 'https://workspace-123.ap-southeast-1.maas.aliyuncs.com/api/v1';
 const key = 'private-test-secret';
@@ -63,7 +63,7 @@ test('Qwen constructor is offline, fixes the exact model and preserves supported
     'https://dashscope.aliyuncs.com.evil.example/api/v1', 'https://127.0.0.1/api/v1',
     'https://u:p@dashscope.aliyuncs.com/api/v1', 'https://dashscope.aliyuncs.com:444/api/v1',
     'https://dashscope.aliyuncs.com/api/v1?key=secret', 'https://dashscope.aliyuncs.com/api/v1#x',
-    'https://dashscope.aliyuncs.com/api/v1#', 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://dashscope.aliyuncs.com/api/v1#', 'https://dashscope.aliyuncs.com/compatible-mode/v2',
     'https://test.us-east-1.maas.aliyuncs.com/api/v1', 'https://a.b.cn-beijing.maas.aliyuncs.com/api/v1',
   ]) assert.throws(() => client(() => json({}), {}, base));
   for (const value of ['', 'a\nb', 'a b', 'x'.repeat(4097)]) {
@@ -310,10 +310,37 @@ test('Qwen synthesis verifies ready model, sends exact WAV request, downloads wi
   });
 });
 
+test('Qwen upgrades official HTTP OSS audio URLs to HTTPS without changing signatures or sending credentials', async () => {
+  await temporary(async file => {
+    for (const host of ['dashscope-result-bj.oss-cn-beijing.aliyuncs.com', 'dashscope-result.oss-ap-southeast-1.aliyuncs.com']) {
+      const query = '?Signature=a%2Bb%2Fc%3D&Expires=9999999999&OSSAccessKeyId=test%2Fkey&part=1+2';
+      const sourceUrl = `http://${host}/pre/audio%20test.wav${query}`;
+      const secureUrl = `https://${host}/pre/audio%20test.wav${query}`;
+      const audio = pcm(1, 24000);
+      const requested: string[] = [];
+      const service = client((url, init) => {
+        requested.push(url);
+        assert.ok(url.startsWith('https://'), 'Plaintext HTTP must never reach transport');
+        if (requested.length === 1) return json({ status: 'OK' });
+        if (requested.length === 2) return json({ audio: { url: sourceUrl } });
+        assert.equal(url, secureUrl);
+        assert.equal(init.method, 'GET');
+        assert.equal(init.headers, undefined);
+        return new Response(new Uint8Array(audio));
+      });
+      await service.synthesize('hello', id, file);
+      assert.equal(requested.length, 3);
+      assert.deepEqual(await fs.readFile(file), audio);
+    }
+  });
+});
+
 test('Qwen synthesis rejects unsafe download URLs before any download or file write', async () => {
   await temporary(async file => {
     for (const url of [
-      'http://dashscope-result.oss-cn-beijing.aliyuncs.com/a.wav', 'https://127.0.0.1/a.wav',
+      'http://evil.example/a.wav', 'http://127.0.0.1/a.wav', 'http://user:pass@bucket.oss-cn-beijing.aliyuncs.com/a.wav',
+      'http://bucket.oss-cn-beijing.aliyuncs.com:8080/a.wav', 'http://bucket.oss-cn-beijing-internal.aliyuncs.com/a.wav',
+      'ftp://bucket.oss-cn-beijing.aliyuncs.com/a.wav', 'https://127.0.0.1/a.wav',
       'https://localhost/a.wav', 'https://169.254.169.254/a.wav', 'https://[::1]/a.wav',
       'https://evil.example/a.wav', 'https://bucket.oss-cn-beijing.aliyuncs.com.evil.example/a.wav',
       'https://bucket.oss-cn-beijing-internal.aliyuncs.com/a.wav',
@@ -394,6 +421,189 @@ test('Qwen rejects empty, oversized and control-character text before network an
     await assert.rejects(client(() => { calls++; return json({ status }); }).synthesize('hello', id, 'unused.wav'));
     assert.equal(calls, 1);
   }
+});
+
+test('Qwen normalization accepts official compatible endpoints offline and rejects unsafe variants', () => {
+  for (const host of ['token-plan.cn-beijing.maas.aliyuncs.com', 'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'workspace-123.ap-southeast-1.maas.aliyuncs.com']) {
+    for (const suffix of ['/api/v1', '/api/v1/', '/compatible-mode/v1', '/compatible-mode/v1/', '/compatible-mode/v1/chat/completions', '/compatible-mode/v1/chat/completions/']) {
+      assert.equal(normalizeQwenDubbingBaseUrl(`https://${host}${suffix}`), `https://${host}/api/v1`);
+    }
+  }
+  for (const value of [
+    'https://evil.example/compatible-mode/v1',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.example/compatible-mode/v1',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1?api_key=secret',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1#',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/other',
+    'http://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  ]) assert.throws(() => normalizeQwenDubbingBaseUrl(value));
+});
+
+test('Token Plan 3.0 enrolls, polls and synthesizes direct WAV or signed URL on the same account', async () => {
+  await temporary(async file => {
+    const model = 'qwen-audio-3.0-tts-plus' as const;
+    const voice = `${model}-lingvoice-tokenplan`;
+    const native = 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1';
+    const audio = pcm(1, 24000);
+    for (const binary of [true, false]) {
+      const actions: string[] = [];
+      let queries = 0;
+      const service = new QwenDubbingClient({ baseUrl: native.replace('/api/v1', '/compatible-mode/v1'), apiKey: key, model }, {
+        resolveHost: async () => ['8.8.8.8'], pollIntervalMs: 1,
+        fetch: (async (url, init) => {
+          if (String(url) === signedUrl) {
+            actions.push('download'); assert.equal(init?.headers, undefined);
+            return new Response(new Uint8Array(audio));
+          }
+          assert.ok(String(url).startsWith(native + '/services/audio/tts/'));
+          assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${key}`);
+          const body = JSON.parse(init!.body as string);
+          if (body.model === 'voice-enrollment') {
+            actions.push(body.input.action);
+            if (body.input.action === 'create_voice') {
+              assert.equal(body.input.target_model, model);
+              return json({ voice_id: voice });
+            }
+            return json({ status: ++queries === 1 ? 'DEPLOYING' : 'OK', target_model: model });
+          }
+          actions.push('synthesize');
+          assert.equal(String(url), `${native}/services/audio/tts/SpeechSynthesizer`);
+          assert.deepEqual(body, { model, input: { text: '测试', voice, format: 'wav', sample_rate: 24000 } });
+          return binary ? new Response(new Uint8Array(audio), { headers: { 'content-type': 'application/octet-stream' } }) : json({ audio: { url: signedUrl } });
+        }) as typeof fetch,
+      });
+      assert.equal((await service.createVoice(pcm())).voiceId, voice);
+      assert.equal((await service.synthesize('测试', voice, file)).bytes, audio.length);
+      assert.deepEqual(await fs.readFile(file), audio);
+      assert.deepEqual(actions, ['create_voice', 'query_voice', 'query_voice', 'query_voice', 'synthesize', ...(!binary ? ['download'] : [])]);
+    }
+  });
+});
+
+test('Token Plan enrollment HTTP errors are actionable, sanitized and never retried or sent to another host', async () => {
+  for (const status of [401, 403, 404, 429, 500]) {
+    let calls = 0;
+    const service = client(url => {
+      calls++; assert.equal(new URL(url).hostname, 'token-plan.cn-beijing.maas.aliyuncs.com');
+      return Response.json({ code: 'AccessDenied', message: `${key} ${signedUrl} /private/path` }, { status });
+    }, {}, 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions');
+    await assert.rejects(service.createVoice(pcm()), error => {
+      assert.ok(safeError(error));
+      assert.match((error as Error).message, new RegExp(`HTTP ${status} \\(AccessDenied\\)`));
+      assert.ok(!(error as Error).message.includes('/private/path'));
+      if (status === 403 || status === 404) assert.match((error as Error).message, /Token Plan voice enrollment may be unavailable or not permitted/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('Qwen rejects a server-reported different supported voice model before synthesis or deletion', async () => {
+  let calls = 0;
+  const service = client(() => { calls++; return json({ status: 'OK', target_model: 'qwen-audio-3.0-tts-plus' }); });
+  await assert.rejects(service.queryVoice(id), safeError);
+  await assert.rejects(service.deleteVoice(id), safeError);
+  await assert.rejects(service.synthesize('hello', id, 'unused.wav'), safeError);
+  assert.equal(calls, 3);
+});
+
+test('Qwen native HTTP failures preserve only bounded safe status and code diagnostics', async t => {
+  let calls = 0;
+  t.mock.method(https, 'request', ((_url: URL, _options: https.RequestOptions, respond: (response: unknown) => void) => {
+    calls++;
+    const request = new EventEmitter() as EventEmitter & { end: () => void };
+    request.end = () => respond(Object.assign(Readable.from([Buffer.from(JSON.stringify({ code: 'AccessDenied', message: `${key} ${signedUrl}` }))]), {
+      statusCode: 403, headers: { 'content-type': 'application/json' },
+    }));
+    return request;
+  }) as typeof https.request);
+  const service = new QwenDubbingClient({ baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', apiKey: key, model: 'qwen-audio-3.0-tts-plus' }, { resolveHost: async () => ['8.8.8.8'] });
+  await assert.rejects(service.createVoice(pcm()), error => {
+    assert.ok(safeError(error));
+    assert.match((error as Error).message, /HTTP 403 \(AccessDenied\).*Token Plan/);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test('Qwen reports only allowlisted network and provider diagnostics', async () => {
+  await assert.rejects(client(() => { throw new TypeError(`${key} ${signedUrl}`, { cause: { code: 'ENOTFOUND', message: key } }); }).queryVoice(id), /Network or TLS connection failed \(ENOTFOUND\)/);
+  await assert.rejects(client(() => Response.json({ code: 'InvalidApiKey', message: key })).queryVoice(id), /InvalidApiKey/);
+  await assert.rejects(client(() => Response.json({ error: { code: 'AccessDenied', message: signedUrl } })).queryVoice(id), /AccessDenied/);
+  await assert.rejects(client(() => { throw Object.assign(new Error(key), { code: key }); }).queryVoice(id), safeError);
+  await assert.rejects(client(() => new Response('{broken')).queryVoice(id), /malformed JSON/);
+});
+
+test('Qwen rejects direct malformed or oversized audio without altering the destination', async () => {
+  await temporary(async file => {
+    await fs.writeFile(file, 'original');
+    for (const audio of [
+      () => new Response('not audio', { headers: { 'content-type': 'audio/wav' } }),
+      () => new Response(new Uint8Array(pcm(1, 16000))),
+      () => new Response('small', { headers: { 'content-length': String(32 * 1024 * 1024 + 1) } }),
+      () => new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(32 * 1024 * 1024)); c.enqueue(new Uint8Array(1)); c.close(); } })),
+    ]) {
+      let calls = 0;
+      await assert.rejects(client(() => ++calls === 1 ? json({ status: 'OK' }) : audio()).synthesize('hello', id, file), safeError);
+      assert.equal(calls, 2);
+      assert.equal(await fs.readFile(file, 'utf8'), 'original');
+    }
+  });
+});
+
+test('Qwen reports precise stages for reference, returned voice, readiness and model failures', async () => {
+  const expectStage = (stage: RegExp, detail: RegExp) => (error: unknown) => {
+    assert.ok(safeError(error));
+    assert.match((error as Error).message, stage);
+    assert.match((error as Error).message, detail);
+    assert.ok(!(error as Error).message.includes('check input, voice status and service availability'));
+    return true;
+  };
+  await assert.rejects(client(() => { throw new Error('must not fetch'); }).createVoice(pcm(1)), expectStage(/reference validation/, /5–60 seconds/));
+  await assert.rejects(client(() => json({ voice_id: 'foreign-model-voice' })).createVoice(pcm()), expectStage(/voice enrollment/, /supported dubbing model/));
+  await assert.rejects(client(() => json({ status: 'OK', target_model: 'qwen-audio-3.0-tts-plus' })).queryVoice(id), expectStage(/voice query/, /Voice model mismatch/));
+  await temporary(async file => {
+    await assert.rejects(client(() => json({ status: 'DEPLOYING' })).synthesize('Test', id, file), expectStage(/voice readiness/, /Voice is not ready/));
+  });
+  const failed = client((_url, init) => input(init).action === 'create_voice' ? json({ voice_id: id }) : json({ status: 'UNDEPLOYED' }));
+  await assert.rejects(failed.createVoice(pcm()), expectStage(/voice readiness/, /did not deploy successfully/));
+});
+
+test('Qwen preserves safe file failure codes and exact reference, registry and output stages', async () => {
+  await temporary(async (file, directory) => {
+    await assert.rejects(client(() => { throw new Error('must not fetch'); }).createVoice(path.join(directory, 'missing.wav')), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /reference audio.*ENOENT/); assert.ok(!(error as Error).message.includes(directory)); return true;
+    });
+    await assert.rejects(client(() => json({ voice_id: id })).createVoice(pcm(), undefined, async () => {
+      throw Object.assign(new Error(`private registry path ${key}`), { code: 'ENOSPC' });
+    }), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /voice registry.*ENOSPC/); return true;
+    });
+    const service = client((_url, init) => JSON.parse(init.body as string).model === 'voice-enrollment' ? json({ status: 'OK' }) : new Response(new Uint8Array(pcm(1, 24000))));
+    await assert.rejects(service.synthesize('Test', id, path.join(directory, 'missing', 'out.wav')), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /audio output.*ENOENT/); assert.ok(!(error as Error).message.includes(directory)); return true;
+    });
+    assert.equal(await fs.stat(file).then(() => true, () => false), false);
+  });
+});
+
+test('Qwen reports safe download and nested transport causes without leaking signed URLs or exceptions', async () => {
+  await temporary(async file => {
+    const service = client((url, init) => {
+      if (url === signedUrl) throw new TypeError(`private download ${signedUrl}`, { cause: { cause: { code: 'UND_ERR_BODY_TIMEOUT' } } });
+      return JSON.parse(init.body as string).model === 'voice-enrollment' ? json({ status: 'OK' }) : json({ audio: { url: signedUrl } });
+    });
+    await assert.rejects(service.synthesize('Test', id, file), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /audio download.*UND_ERR_BODY_TIMEOUT/); assert.ok(!(error as Error).message.includes(signedUrl)); return true;
+    });
+    const blocked = client((_url, init) => JSON.parse(init.body as string).model === 'voice-enrollment' ? json({ status: 'OK' }) : json({ audio: { url: `https://evil.example/audio?secret=${key}` } }));
+    await assert.rejects(blocked.synthesize('Test', id, file), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /audio download URL.*Untrusted audio download host/); return true;
+    });
+    await assert.rejects(client(() => { throw new Error(`private failure ${key}`); }).queryVoice(id), error => {
+      assert.ok(safeError(error)); assert.match((error as Error).message, /voice query.*Unexpected transport or processing failure/); assert.ok(!(error as Error).message.includes('private failure')); return true;
+    });
+  });
 });
 
 test('Qwen pre-abort performs no DNS or fetch and cancellation releases an uncooperative fetch', async () => {

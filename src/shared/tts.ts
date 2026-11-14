@@ -1,5 +1,10 @@
+import { DEFAULT_DUBBING_MODEL } from './dubbing';
+
+export const DEFAULT_TTS_BASE_URL = 'https://dashscope.aliyuncs.com/api/v1';
+
 export interface TtsSettings {
   providerId: string;
+  baseUrl: string;
   model: string;
   voice: string;
   speed: number;
@@ -7,7 +12,7 @@ export interface TtsSettings {
 }
 
 export const defaultTtsSettings: TtsSettings = {
-  providerId: '', model: 'tts-1', voice: 'alloy', speed: 1, fullUrl: false,
+  providerId: '', baseUrl: '', model: DEFAULT_DUBBING_MODEL, voice: 'alloy', speed: 1, fullUrl: false,
 };
 
 export interface TtsConfig {

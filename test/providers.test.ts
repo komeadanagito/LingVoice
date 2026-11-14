@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ProviderRegistry, ProviderService, createDefaultProviderRegistry, type ProviderAdapter, type TranslationInput } from '../src/main/providers';
+import { parseAsrSegments } from '../src/main/asr';
 import type { ProviderUpdate } from '../src/shared/providers';
 
 const vault = {
@@ -63,6 +64,18 @@ test('OpenAI translation builds chat and Responses with strict ordered JSON pars
   assert.equal(body.model, 'test-model');
   assert.match(body.messages[0].content, /exactly 2 elements/);
   assert.deepEqual(JSON.parse(body.messages[1].content), input.texts);
+  const withWindow = adapter.build(context, {
+    ...input,
+    context: [{ source: 'Hi', translated: '嗨' }],
+    lookahead: ['Later'],
+  });
+  const windowBody = JSON.parse(withWindow.init.body as string);
+  assert.match(windowBody.messages[0].content, /preceding already-translated/);
+  assert.deepEqual(JSON.parse(windowBody.messages[1].content), {
+    preceding: [{ source: 'Hi', translated: '嗨' }],
+    translate: input.texts,
+    following: ['Later'],
+  });
   assert.deepEqual(adapter.parse(chat('```json\n["你好\\n世界","再见"]\n```'), 2), ['你好\n世界', '再见']);
   const responses = adapter.build({ ...context, baseUrl: 'https://example.com/v1/' }, { ...input, protocol: 'responses' });
   assert.equal(responses.url, 'https://example.com/v1/responses');
@@ -80,25 +93,34 @@ test('OpenAI translation builds chat and Responses with strict ordered JSON pars
   assert.throws(() => adapter.parse({}, 2));
 });
 
-test('OpenAI ASR builds multipart verbose timestamp requests and requires segments', async () => {
+test('ASR always builds JSON chat requests and preserves timestamp response parsing', () => {
   const adapter = createDefaultProviderRegistry().get('openai-compatible').asr!;
   const wav = new Uint8Array([82, 73, 70, 70]);
-  const input = { wav, model: 'whisper-1', language: 'zh', prompt: 'Names', fullUrl: false };
+  const input = { wav, model: 'custom-asr', language: 'zh', prompt: 'Names', fullUrl: false };
   const request = adapter.build(context, input);
-  assert.equal(request.url, 'https://example.com/proxy/v1/audio/transcriptions');
-  assert.deepEqual(request.init.headers, { Authorization: 'Bearer private-key' });
-  const form = request.init.body as FormData;
-  assert.equal(form.get('model'), 'whisper-1');
-  assert.equal(form.get('response_format'), 'verbose_json');
-  assert.deepEqual(form.getAll('timestamp_granularities[]'), ['segment']);
-  assert.equal(form.get('language'), 'zh'); assert.equal(form.get('prompt'), 'Names');
-  const file = form.get('file') as File;
-  assert.equal(file.type, 'audio/wav'); assert.equal(file.name, 'audio.wav');
-  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), wav);
-  const empty = adapter.build({ ...context, apiKey: '' }, { ...input, language: '', prompt: '' }).init.body as FormData;
-  assert.equal(empty.has('language'), false); assert.equal(empty.has('prompt'), false);
-  const exact = 'https://example.com/complete?version=1';
-  assert.equal(adapter.build({ ...context, baseUrl: exact }, { ...input, fullUrl: true }).url, exact);
+  assert.equal(request.url, 'https://example.com/proxy/compatible-mode/v1/chat/completions');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.redirect, 'error');
+  assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', Authorization: 'Bearer private-key' });
+  assert.deepEqual(JSON.parse(request.init.body as string), {
+    model: 'custom-asr',
+    messages: [
+      { role: 'system', content: 'Names' },
+      { role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'data:audio/wav;base64,UklGRg==' } }] },
+    ],
+    stream: false,
+    asr_options: { enable_itn: false, language: 'zh' },
+  });
+  const empty = adapter.build({ ...context, apiKey: '' }, { ...input, language: '', prompt: '' });
+  assert.deepEqual(empty.init.headers, { 'Content-Type': 'application/json' });
+  assert.deepEqual(JSON.parse(empty.init.body as string), {
+    model: 'custom-asr',
+    messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'data:audio/wav;base64,UklGRg==' } }] }],
+    stream: false,
+    asr_options: { enable_itn: false },
+  });
+  const legacy = 'https://example.com/v1/audio/transcriptions?version=1';
+  assert.equal(adapter.build({ ...context, baseUrl: legacy }, { ...input, fullUrl: true }).url, 'https://example.com/v1/chat/completions?version=1');
   const value = { segments: [{ start: 0, end: 1, text: 'Hello' }], language: 'en' };
   assert.deepEqual(adapter.parse(value), value);
   assert.throws(() => adapter.parse({ text: 'Hello' }), /timestamped segments/);
@@ -263,6 +285,33 @@ test('OpenAI speech builds mp3 requests and preserves exact full URL semantics',
   assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', Authorization: 'Bearer private-key' });
   const exact = 'https://example.com/custom/%61?api-version=2026';
   assert.equal(adapter.build({ ...context, baseUrl: exact }, { ...input, fullUrl: true }).url, exact);
+  assert.equal(adapter.build(context, { ...input, model: 'qwen-audio-3.1-tts-plus' }).url, 'https://example.com/proxy/v1/audio/speech');
+  assert.equal(
+    adapter.build({ ...context, baseUrl: 'https://dashscope.aliyuncs.com/api/v1' }, { ...input, model: 'qwen-audio-3.1-tts-plus' }).url,
+    'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+  );
+  assert.equal(
+    adapter.build({ ...context, baseUrl: 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1' }, { ...input, model: 'qwen-audio-3.1-tts-plus' }).url,
+    'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+  );
+  const volcReq = adapter.build(
+    { ...context, baseUrl: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional' },
+    { ...input, model: 'doubao-seed-tts-2.0' },
+  );
+  assert.equal(volcReq.url, 'https://openspeech.bytedance.com/api/v3/tts/unidirectional');
+  assert.equal((volcReq.init.headers as Record<string, string>)['X-Api-Key'], 'private-key');
+  assert.equal((volcReq.init.headers as Record<string, string>)['X-Api-Resource-Id'], 'seed-tts-2.0');
+  assert.deepEqual(JSON.parse(volcReq.init.body as string), {
+    req_params: {
+      text: 'Hello',
+      speaker: 'zh_female_shuangkuaisisi_moon_bigtts',
+      model: 'seed-tts-2.0-standard',
+      audio_params: {
+        format: 'mp3',
+        speed_ratio: 0.25,
+      },
+    },
+  });
   assert.equal(createDefaultProviderRegistry().get('openai-compatible').models!.build({ ...context, baseUrl: 'https://example.com/v1/audio/speech?version=1' }).url, 'https://example.com/v1/models?version=1');
 });
 
@@ -311,4 +360,117 @@ test('generic model discovery times out at 30 seconds even when fetch ignores ca
     t.mock.timers.tick(1); await rejection;
     assert.equal(signal!.aborted, true);
   });
+});
+
+test('Qwen compatible ASR parses a realistic chat completion with usage and language metadata', () => {
+  const adapter = createDefaultProviderRegistry().get('openai-compatible').asr!;
+  const response = {
+    id: 'chatcmpl-asr-fixture',
+    object: 'chat.completion',
+    created: 1793073600,
+    model: 'qwen-audio-3.0-asr-flash',
+    choices: [{
+      index: 0,
+      finish_reason: 'stop',
+      message: { role: 'assistant', content: '欢迎使用语音识别。现在开始测试！', annotations: [{ type: 'language', language: 'zh' }] },
+      logprobs: null,
+    }],
+    usage: { prompt_tokens: 32, completion_tokens: 14, total_tokens: 46, prompt_tokens_details: { audio_tokens: 32, text_tokens: 0 } },
+  };
+  const cues = parseAsrSegments(adapter.parse(response), 10, 30);
+  assert.deepEqual(cues.map(cue => cue.text), ['欢迎使用语音识别。', '现在开始测试！']);
+  assert.deepEqual(cues.map(cue => cue.id), [1, 2]);
+  assert.ok(cues[0].start >= 30);
+  assert.ok(cues[0].end > cues[0].start);
+  assert.ok(cues[1].start >= cues[0].end);
+  assert.ok(cues[1].end > cues[1].start && cues[1].end <= 40);
+  assert.deepEqual(adapter.parse({ ...response, choices: [{ ...response.choices[0], message: { role: 'assistant', content: '' } }] }), { segments: [] });
+  for (const value of [{ choices: [] }, { choices: [{ message: null }] }]) {
+    assert.throws(() => adapter.parse(value), /timestamped segments/);
+  }
+});
+
+test('Qwen chat ASR sends a data URL, separate context and language options', () => {
+  const asr = createDefaultProviderRegistry().get('openai-compatible').asr!;
+  for (const fullUrl of [false, true]) {
+    const req = asr.build({
+      baseUrl: fullUrl ? 'https://example.com/v1/chat/completions' : 'https://example.com/v1',
+      apiKey: 'key',
+    }, { wav: new Uint8Array([1, 2]), model: 'qwen-audio-3.0-asr-flash', language: 'zh', prompt: '词汇', fullUrl });
+    assert.equal(req.url, 'https://example.com/v1/chat/completions');
+    const body = JSON.parse(req.init.body as string);
+    assert.deepEqual(body.messages, [
+      { role: 'system', content: '词汇' },
+      { role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'data:audio/wav;base64,AQI=' } }] },
+    ]);
+    assert.deepEqual(body.asr_options, { enable_itn: false, language: 'zh' });
+  }
+  const req = asr.build({ baseUrl: 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', apiKey: '' },
+    { wav: new Uint8Array([1]), model: 'qwen-audio-3.0-asr-flash', language: '', prompt: '', fullUrl: true });
+  const body = JSON.parse(req.init.body as string);
+  assert.equal(req.url, 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions');
+  assert.equal(body.messages.length, 1);
+  assert.equal(body.stream, false);
+  assert.deepEqual(body.asr_options, { enable_itn: false });
+});
+
+test('DashScope Qwen ASR uses compatible chat requests and parses timestamp sentences and choices', () => {
+  const adapter = createDefaultProviderRegistry().get('openai-compatible');
+  const asrCtx = {
+    baseUrl: 'https://llm-io6clfdhxabjddi0.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    apiKey: 'dashscope-key',
+  };
+  const asrInput = {
+    wav: new Uint8Array([82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69]),
+    model: 'qwen-audio-3.1-asr-flash',
+    language: 'zh',
+    prompt: '专业术语',
+    fullUrl: false,
+  };
+  const req = adapter.asr!.build(asrCtx, asrInput);
+  assert.equal(req.url, `${asrCtx.baseUrl}/chat/completions`);
+  assert.equal((req.init.headers as Record<string, string>)['Authorization'], 'Bearer dashscope-key');
+  assert.equal((req.init.headers as Record<string, string>)['Content-Type'], 'application/json');
+
+  const body = JSON.parse(req.init.body as string);
+  assert.equal(body.model, 'qwen-audio-3.1-asr-flash');
+  assert.equal(body.stream, false);
+  assert.deepEqual(body.asr_options, { enable_itn: false, language: 'zh' });
+  assert.deepEqual(body.messages, [
+    { role: 'system', content: '专业术语' },
+    { role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${Buffer.from(asrInput.wav).toString('base64')}` } }] },
+  ]);
+
+  // DashScope native sentence response parsing with timestamps in ms
+  const mockDashScopeResponse = {
+    sentence: {
+      sentence_id: 1,
+      begin_time: 600,
+      end_time: 3800,
+      text: '欢迎体验通义千问语音大模型。',
+    },
+  };
+  const parsed = adapter.asr!.parse(mockDashScopeResponse);
+  const cues = parseAsrSegments(parsed, 10, 0);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0].text, '欢迎体验通义千问语音大模型。');
+  assert.equal(cues[0].start, 0.6);
+  assert.equal(cues[0].end, 3.8);
+
+  // OpenAI Chat completions fallback response parsing
+  const mockChatResponse = {
+    choices: [
+      {
+        message: {
+          role: 'assistant',
+          content: '欢迎体验通义千问语音大模型。本音频由百炼转写生成！',
+        },
+      },
+    ],
+  };
+  const chatParsed = adapter.asr!.parse(mockChatResponse);
+  const chatCues = parseAsrSegments(chatParsed, 10, 0);
+  assert.equal(chatCues.length, 2);
+  assert.equal(chatCues[0].text, '欢迎体验通义千问语音大模型。');
+  assert.equal(chatCues[1].text, '本音频由百炼转写生成！');
 });

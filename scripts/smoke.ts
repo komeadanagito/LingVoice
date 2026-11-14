@@ -177,7 +177,7 @@ app.whenReady().then(async () => {
       sourceAuto: document.getElementById('translation-source-language').value,
       audioAuto: document.getElementById('asr-language').value,
       terminologyRemoved: !document.querySelector('.asr-section').textContent.includes('Terminology')
-    })`), { translation: 'test-model', asr: 'whisper-1', tts: 'tts-1', sourceAuto: 'auto', audioAuto: '', terminologyRemoved: true });
+    })`), { translation: 'test-model', asr: 'qwen-audio-3.1-asr-flash', tts: 'qwen-audio-3.1-tts-plus', sourceAuto: 'auto', audioAuto: '', terminologyRemoved: true });
     await fixture.webContents.executeJavaScript(`(() => {
       const input = document.querySelector('.tts-text-field textarea');
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'Offline speech test');

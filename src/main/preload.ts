@@ -11,6 +11,10 @@ function invoke<K extends keyof IpcContract>(
 
 const api: LingVoiceApi = {
   runtime: 'desktop',
+  history: () => invoke('history:list'),
+  saveHistoryTask: task => invoke('history:save', task),
+  deleteHistoryTask: id => invoke('history:delete', id),
+  selectHistoryTask: id => invoke('history:select', id),
   dubbingConfig: () => invoke('dubbing:config'),
   saveDubbingConfig: settings => invoke('dubbing:save', settings),
   checkDubbing: () => invoke('dubbing:check'),
@@ -46,6 +50,8 @@ const api: LingVoiceApi = {
   saveTranslationConfig: update => invoke('translation:save', update),
   translationModels: () => invoke('translation:models'),
   translateSubtitles: request => invoke('translation:run', request),
+  summarizeTranslation: request => invoke('translation:memory', request),
+  reviewTranslation: request => invoke('translation:review', request),
   state: () => invoke('app:state'),
   setLocale: locale => invoke('app:locale', locale),
   chooseFolder: () => invoke('folder:choose'),

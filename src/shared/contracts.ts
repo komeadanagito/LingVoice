@@ -1,5 +1,6 @@
+import type { HistoryState, HistoryTask } from './history';
 import type { Locale, MessageKey, MessageValues } from './i18n/catalog';
-import type { TranslationConfig, TranslationConfigUpdate, TranslationRequest } from './translation';
+import type { TranslationConfig, TranslationConfigUpdate, TranslationRequest, TranslationReviewRequest, TranslationPatch, TranslationMemoryRequest, TranslationMemory } from './translation';
 import type { AsrConfig, AsrConfigUpdate, AsrCue, AsrProgress, AsrRequest } from './asr';
 import type { TtsAudio, TtsConfig, TtsConfigUpdate, TtsRequest } from './tts';
 import type { DubbingConfig, DubbingEnvironment, DubbingSettings, DubbingRequest, DubbingResult, DubbingProgress } from './dubbing';
@@ -37,6 +38,10 @@ export interface AppState { folder: string; version: string; locale: Locale }
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; errorKey?: MessageKey; errorValues?: MessageValues };
 
 export interface IpcContract {
+  'history:list': { args: []; result: HistoryState };
+  'history:save': { args: [task: HistoryTask]; result: void };
+  'history:delete': { args: [id: string]; result: void };
+  'history:select': { args: [id: string]; result: void };
   'dubbing:config': { args: []; result: DubbingConfig };
   'dubbing:save': { args: [settings: DubbingSettings]; result: DubbingConfig };
   'dubbing:check': { args: []; result: DubbingEnvironment };
@@ -61,6 +66,8 @@ export interface IpcContract {
   'translation:save': { args: [update: TranslationConfigUpdate]; result: TranslationConfig };
   'translation:models': { args: []; result: string[] };
   'translation:run': { args: [request: TranslationRequest]; result: string[] };
+  'translation:memory': { args: [request: TranslationMemoryRequest]; result: TranslationMemory };
+  'translation:review': { args: [request: TranslationReviewRequest]; result: TranslationPatch[] };
   'app:state': { args: []; result: AppState };
   'app:locale': { args: [locale: Locale]; result: Locale };
   'folder:choose': { args: []; result: string };
@@ -74,6 +81,10 @@ export interface IpcContract {
 }
 
 export interface LingVoiceApi {
+  history(): Promise<IpcResult<HistoryState>>;
+  saveHistoryTask(task: HistoryTask): Promise<IpcResult<void>>;
+  deleteHistoryTask(id: string): Promise<IpcResult<void>>;
+  selectHistoryTask(id: string): Promise<IpcResult<void>>;
   /** Identifies the transport; both runtimes support provider-backed tasks. */
   runtime?: 'desktop' | 'browser';
   dubbingConfig(): Promise<IpcResult<DubbingConfig>>;
@@ -103,6 +114,8 @@ export interface LingVoiceApi {
   saveTranslationConfig(update: TranslationConfigUpdate): Promise<IpcResult<TranslationConfig>>;
   translationModels(): Promise<IpcResult<string[]>>;
   translateSubtitles(request: TranslationRequest): Promise<IpcResult<string[]>>;
+  summarizeTranslation(request: TranslationMemoryRequest): Promise<IpcResult<TranslationMemory>>;
+  reviewTranslation(request: TranslationReviewRequest): Promise<IpcResult<TranslationPatch[]>>;
   state(): Promise<IpcResult<AppState>>;
   setLocale(locale: Locale): Promise<IpcResult<Locale>>;
   chooseFolder(): Promise<IpcResult<string>>;

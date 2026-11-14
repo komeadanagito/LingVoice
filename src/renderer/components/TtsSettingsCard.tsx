@@ -1,32 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ProviderCatalog } from '../../shared/providers';
-import { defaultTtsSettings, type TtsSettings } from '../../shared/tts';
+import { DEFAULT_DUBBING_MODEL, SUPPORTED_DUBBING_MODELS } from '../../shared/dubbing';
+import { DEFAULT_TTS_BASE_URL, defaultTtsSettings, type TtsSettings } from '../../shared/tts';
 import { useI18n } from '../i18n';
-import type { useProviderModels } from '../hooks/useProviderModels';
-import { ModelPicker } from './ModelPicker';
 import { Select } from './Select';
 
-type Models = ReturnType<typeof useProviderModels>;
-const voices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'];
+const dubbingModelOptions = SUPPORTED_DUBBING_MODELS.map(value => ({ value, label: value }));
+
+function dubbingModel(model: string): string {
+  return (SUPPORTED_DUBBING_MODELS as readonly string[]).includes(model) ? model : DEFAULT_DUBBING_MODEL;
+}
 
 interface Props {
-  catalog: ProviderCatalog;
-  models: Models;
   disabled: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }
 
-export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, onToggleCollapse }: Props) {
+export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse }: Props) {
   const { locale } = useI18n();
   const zh = locale === 'zh-CN';
-  const [settings, setSettings] = useState<TtsSettings>({ ...defaultTtsSettings });
+  const [settings, setSettings] = useState<TtsSettings>({ ...defaultTtsSettings, baseUrl: DEFAULT_TTS_BASE_URL });
   const [hasKey, setHasKey] = useState(false);
   const [key, setKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [text, setText] = useState('');
-  const [customVoice, setCustomVoice] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -36,15 +34,23 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
   const running = useRef(false);
   const live = useRef(false);
 
+  function applySettings(next: TtsSettings) {
+    setSettings({
+      ...next,
+      providerId: '',
+      model: dubbingModel(next.model),
+      baseUrl: next.baseUrl || DEFAULT_TTS_BASE_URL,
+    });
+  }
+
   useEffect(() => {
     live.current = true;
     let active = true;
     void window.lingvoice.ttsConfig().then(result => {
       if (!active) return;
       if (!result.ok) throw new Error(result.error);
-      setSettings(result.data.settings);
+      applySettings(result.data.settings);
       setHasKey(result.data.hasApiKey);
-      setCustomVoice(!voices.includes(result.data.settings.voice));
       setLoaded(true);
     }).catch(error => { if (active) setFeedback({ error: true, text: String(error instanceof Error ? error.message : error) }); });
     return () => {
@@ -54,19 +60,19 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
   }, []);
   useEffect(() => () => { if (audio) URL.revokeObjectURL(audio.url); }, [audio]);
 
-  const provider = catalog.providers.find(item => item.id === settings.providerId);
-  const adapter = catalog.adapters.find(item => item.id === provider?.adapter);
-  const options = catalog.providers.filter(item => catalog.adapters.find(a => a.id === item.adapter)?.capabilities.includes('tts'))
-    .map(item => ({ value: item.id, label: item.name }));
-  if (settings.providerId && !options.some(item => item.value === settings.providerId)) options.unshift({ value: settings.providerId, label: zh ? '原 Provider 不可用' : 'Provider unavailable' });
   const blocked = disabled || !loaded || saving || generating;
+  const canTest = !!settings.baseUrl.trim() && !!text.trim();
+  const tokenPlan = /^https:\/\/token-plan\.cn-beijing\.maas\.aliyuncs\.com(?:\/|$)/i.test(settings.baseUrl.trim());
 
   async function save(explicitKey?: string) {
-    const payload = { settings, ...(explicitKey !== undefined ? { apiKey: explicitKey } : key ? { apiKey: key } : {}) };
+    const payload = {
+      settings: { ...settings, providerId: '', baseUrl: settings.baseUrl.trim() || DEFAULT_TTS_BASE_URL, model: dubbingModel(settings.model) },
+      ...(explicitKey !== undefined ? { apiKey: explicitKey } : key ? { apiKey: key } : {}),
+    };
     const result = await window.lingvoice.saveTtsConfig(payload);
     if (!result.ok) throw new Error(result.error);
     if (live.current) {
-      setSettings(result.data.settings);
+      applySettings(result.data.settings);
       setHasKey(result.data.hasApiKey);
       setKey('');
     }
@@ -81,7 +87,7 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
     setSaving(true); setFeedback(null);
     try {
       await save('');
-      if (live.current) setFeedback({ error: false, text: zh ? '已清除独立密钥，已恢复使用 Provider 默认密钥' : 'Custom key cleared; reverted to Provider default key' });
+      if (live.current) setFeedback({ error: false, text: zh ? '已清除密钥' : 'Key cleared' });
     } catch (error) { if (live.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) }); }
     finally { if (live.current) setSaving(false); }
   }
@@ -133,7 +139,6 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
       >
         <div>
           <h3 id="tts-settings-title">{zh ? '视频配音服务 · TTS' : 'Video dubbing · TTS'}</h3>
-          <p>{zh ? '配置视频配音所使用的云端语音合成服务商（Provider）、模型与授权密钥。' : 'Configure the cloud provider, model and API key used for video dubbing.'}</p>
         </div>
         <svg className="section-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="m6 9 6 6 6-6" />
@@ -141,73 +146,35 @@ export function TtsSettingsCard({ catalog, models, disabled, collapsed = false, 
       </button>
     </div>
     <div id="tts-section-body" className="settings-section-body">
-      <p className="settings-hint">{zh ? '此处配置专门服务于视频配音（推荐使用 qwen-audio-3.0-tts-plus 或 qwen-audio-3.1-tts-plus）。配音语速由视频台词时间轴自动精准对齐，无需在此设置固定语速。' : 'Configures cloud speech synthesis specifically for video dubbing (recommended models: qwen-audio-3.0-tts-plus or qwen-audio-3.1-tts-plus). Speech tempo is automatically aligned to video timestamps.'}</p>
       <fieldset className="translation-fields" disabled={blocked}>
         <div className="settings-form-grid">
-          <label>Provider<Select id="tts-provider" value={settings.providerId} options={[{ value: '', label: zh ? '请选择 Provider' : 'Choose a provider' }, ...options]} onChange={providerId => { setSettings(previous => ({ ...previous, providerId })); setFeedback(null); }} /></label>
-          <label>{zh ? '配音模型' : 'Dubbing model'}<ModelPicker id="tts-model" providerId={settings.providerId} value={settings.model} onChange={model => setSettings(previous => ({ ...previous, model }))} entry={models.entries[settings.providerId]} onFetch={() => void models.fetchModels(settings.providerId)} supportsModels={!!adapter?.capabilities.includes('models')} placeholder="qwen-audio-3.0-tts-plus" zh={zh} disabled={blocked} /></label>
-          <label>
-            {zh ? '默认音色' : 'Default voice'}
-            {customVoice ? (
-              <div className="model-input">
-                <input
-                  aria-label={zh ? '克隆 / 自定义音色 ID' : 'Cloned / Custom voice ID'}
-                  value={settings.voice}
-                  onChange={event => setSettings(previous => ({ ...previous, voice: event.target.value }))}
-                  placeholder={zh ? '输入克隆音色 ID 或服务商音色（例如 cherry）' : 'Enter cloned voice ID or provider voice'}
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  className="choose-file-button"
-                  onClick={() => {
-                    setCustomVoice(false);
-                    if (!voices.includes(settings.voice)) setSettings(previous => ({ ...previous, voice: 'alloy' }));
-                  }}
-                >
-                  {zh ? '预设音色' : 'Preset voices'}
-                </button>
-              </div>
-            ) : (
-              <Select
-                id="tts-voice"
-                value={settings.voice}
-                options={[
-                  { value: '__custom__', label: zh ? '克隆 / 自定义音色…' : 'Cloned / Custom voice…' },
-                  ...voices.map(value => ({ value, label: value })),
-                ]}
-                onChange={voice => {
-                  if (voice === '__custom__') {
-                    setCustomVoice(true);
-                  } else {
-                    setSettings(previous => ({ ...previous, voice }));
-                  }
-                }}
-              />
-            )}
-          </label>
-          <label>{zh ? '独立 API Key（可选）' : 'Custom API Key (optional)'}
+          <label>{zh ? '接口地址 (Base URL)' : 'Base URL'}<input id="tts-base-url" aria-describedby={tokenPlan ? 'tts-token-plan-hint' : undefined} type="url" value={settings.baseUrl} placeholder={DEFAULT_TTS_BASE_URL} spellCheck={false} onChange={event => setSettings(previous => ({ ...previous, baseUrl: event.target.value }))} /></label>
+          <label>{zh ? '配音模型' : 'Dubbing model'}<Select id="tts-model" value={dubbingModel(settings.model)} options={dubbingModelOptions} onChange={model => setSettings(previous => ({ ...previous, model }))} /></label>
+          <label>{zh ? 'API Key（密钥）' : 'API Key'}
             <div className="secret-input">
               <input
                 type={showKey ? 'text' : 'password'}
                 value={key}
                 autoComplete="off"
-                placeholder={hasKey ? (zh ? '已配置独立密钥；留空保留' : 'Custom key saved; leave blank to keep') : (zh ? '留空使用 Provider 默认密钥' : 'Leave blank to use Provider key')}
+                placeholder={hasKey ? (zh ? '已配置密钥；留空保留' : 'Key saved; leave blank to keep') : (zh ? '输入服务商 API Key' : 'Enter provider API key')}
                 onChange={event => setKey(event.target.value)}
-                aria-label={zh ? '独立 API Key' : 'Custom API Key'}
+                aria-label={zh ? 'API Key' : 'API Key'}
               />
               <button type="button" aria-pressed={showKey} onClick={() => setShowKey(value => !value)}>
                 {zh ? (showKey ? '隐藏' : '显示') : (showKey ? 'Hide' : 'Show')}
               </button>
             </div>
           </label>
-          <label className="checkbox-field"><input type="checkbox" checked={settings.fullUrl} onChange={event => setSettings(previous => ({ ...previous, fullUrl: event.target.checked }))} />{zh ? 'Provider 地址是完整请求地址' : 'Provider URL is a complete endpoint'}</label>
+          <label className="checkbox-field"><input type="checkbox" checked={settings.fullUrl} onChange={event => setSettings(previous => ({ ...previous, fullUrl: event.target.checked }))} />{zh ? '接口地址是完整请求地址' : 'URL is a complete endpoint'}</label>
         </div>
+        {tokenPlan && <p className="settings-hint" id="tts-token-plan-hint">{zh
+          ? 'Token Plan：会自动使用同一域名的 /api/v1 语音接口。当前官方文档列出 qwen-audio-3.0-tts-plus；音色复刻还需账号开放 voice-enrollment 权限，普通合成连接测试成功不代表支持复刻。'
+          : 'Token Plan uses the same host’s native /api/v1 speech API. Current documentation lists qwen-audio-3.0-tts-plus. Cloned dubbing additionally needs voice-enrollment access; a successful synthesis test does not verify cloning support.'}</p>}
         <label className="tts-text-field">{zh ? '测试连通性文本' : 'Connectivity test text'}<textarea aria-label={zh ? '合成文本' : 'Text to synthesize'} maxLength={4096} value={text} onChange={event => setText(event.target.value)} placeholder={zh ? '输入测试文字以验证配音服务商连通性…' : 'Enter test text to verify dubbing provider connectivity…'} /><span className="settings-hint">{text.length}/4096</span></label>
         <div className="settings-actions">
           <button className="primary tts-save" type="button" onClick={() => void saveOnly()}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存配音设置' : 'Save dubbing settings')}</button>
-          <button className="choose-file-button tts-generate" type="button" disabled={!settings.providerId || !text.trim()} onClick={() => void generate()}>{generating ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试配音连接' : 'Test dubbing connection')}</button>
-          {hasKey && <button className="text-button" type="button" onClick={() => void clearKey()}>{zh ? '清除独立密钥' : 'Clear custom key'}</button>}
+          <button className="choose-file-button tts-generate" type="button" disabled={!canTest} onClick={() => void generate()}>{generating ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试配音连接' : 'Test dubbing connection')}</button>
+          {hasKey && <button className="text-button" type="button" onClick={() => void clearKey()}>{zh ? '清除密钥' : 'Clear key'}</button>}
         </div>
       </fieldset>
       {generating && <button className="cancel-button tts-cancel" type="button" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? (zh ? '取消中…' : 'Cancelling…') : (zh ? '取消测试' : 'Cancel test')}</button>}

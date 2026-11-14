@@ -8,6 +8,7 @@ import type { DownloadEvent, DownloadResult, VideoInfo } from '../src/shared/con
 import { LocalizedError, translate } from '../src/shared/i18n/translate';
 
 const url = 'https://www.bilibili.com/video/BV1xx411c7mD';
+const ytUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 
 test('normalizes a video URL and keeps only its selected part', () => {
   assert.equal(normalizeUrl(`${url}/?p=2&share_source=copy#reply`), `${url}/?p=2`);
@@ -72,12 +73,12 @@ test('inspection uses cookie arguments safely and rejects playlists', async () =
   const downloader = new Downloader({ dataDir: '.', emit() {} });
   let args: string[] = [];
   downloader.run = async options => { args = options; return '{"title":"演示","formats":[]}'; };
-  assert.equal((await downloader.inspect(url, 'C:\\my cookies.txt')).title, '演示');
+  assert.equal((await downloader.inspect(ytUrl, 'C:\\my cookies.txt')).title, '演示');
   assert.equal(args[args.indexOf('--cookies') + 1], 'C:\\my cookies.txt');
   assert.ok(args.includes('--ignore-config'));
   assert.equal(args.at(-2), '--');
   downloader.run = async () => '{"_type":"playlist"}';
-  await assert.rejects(downloader.inspect(url), /暂不支持合集/);
+  await assert.rejects(downloader.inspect(ytUrl), /暂不支持合集/);
 });
 test('download forwards progress and only returns existing in-folder output', async () => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-test-'));
@@ -95,7 +96,7 @@ test('download forwards progress and only returns existing in-folder output', as
       line(`LINGVOICE_FILE:${file}`);
       return '';
     };
-    const result: DownloadResult = await downloader.download({ url, folder, height: '720' });
+    const result: DownloadResult = await downloader.download({ url: ytUrl, folder, height: '720' });
     assert.deepEqual(result, { file });
     const progress = events[0];
     assert.ok(progress && progress.type === 'progress');
@@ -106,15 +107,15 @@ test('download forwards progress and only returns existing in-folder output', as
       line(`LINGVOICE_FILE:${path.join(folder, '..', 'outside.mp4')}`);
       return '';
     };
-    await assert.rejects(downloader.download({ url, folder, height: 'best' }), /路径异常/);
+    await assert.rejects(downloader.download({ url: ytUrl, folder, height: 'best' }), /路径异常/);
     downloader.run = async () => '';
-    await assert.rejects(downloader.download({ url, folder, height: 'best' }), /未返回下载文件/);
+    await assert.rejects(downloader.download({ url: ytUrl, folder, height: 'best' }), /未返回下载文件/);
     downloader.run = async (_args, line) => {
       assert.ok(line);
       line(`LINGVOICE_FILE:${path.join(folder, 'missing.mp4')}`);
       return '';
     };
-    await assert.rejects(downloader.download({ url, folder, height: 'best' }), /ENOENT/);
+    await assert.rejects(downloader.download({ url: ytUrl, folder, height: 'best' }), /ENOENT/);
   } finally { await fs.rm(folder, { recursive: true, force: true }); }
 });
 test('cancellation before process launch prevents execution', async () => {
@@ -138,11 +139,11 @@ test('inspection rejects invalid JSON shapes and releases its lock', async () =>
   const downloader = new Downloader({ dataDir: '.', emit() {} });
   for (const raw of ['null', '[]', 'not-json']) {
     downloader.run = async () => raw;
-    await assert.rejects(downloader.inspect(url));
+    await assert.rejects(downloader.inspect(ytUrl));
     assert.equal(downloader.busy, false);
   }
   downloader.run = async () => '{"title":"Recovered"}';
-  assert.equal((await downloader.inspect(url)).title, 'Recovered');
+  assert.equal((await downloader.inspect(ytUrl)).title, 'Recovered');
 });
 test('missing optional FFmpeg configuration fails explicitly and releases its lock', async () => {
   const downloader = new Downloader({ dataDir: '.', emit() {} });
@@ -171,7 +172,7 @@ test('metadata fallback keys appear only when source labels are missing', () => 
   assert.equal(missing.uploaderKey, 'video.unknownUploader');
 });
 
-test('initial component preparation provides a translation key', { skip: process.platform !== 'win32' }, async () => {
+test('initial component preparation provides a translation key', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-tools-'));
   const events: DownloadEvent[] = [];
   const originalFetch = globalThis.fetch;

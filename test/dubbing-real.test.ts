@@ -24,6 +24,7 @@ test('real FFmpeg dubbing pipeline exports synchronized media with unchanged vid
     directory: path.join(directory, 'tasks'), ffmpegPath: ffmpeg!, helperPath: 'not-used-by-mocked-separator',
     tts: { withDubbingContext: action => action({ baseUrl: 'unused', apiKey: 'offline-test-only' }) },
     translation: {
+      summarize: async request => request.memory,
       getConfig: async () => ({ settings: { ...defaultTranslationSettings, targetLanguage: 'en' }, hasApiKey: false, hasMachineKey: false }),
       translate: async () => { throw new Error('Existing translations must be reused.'); },
     }, emit: event => events.push(event),

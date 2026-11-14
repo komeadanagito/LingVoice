@@ -2,13 +2,28 @@
 import type { DownloadEvent, IpcResult, LingVoiceApi } from '../shared/contracts';
 import { isLocale } from '../shared/i18n/catalog';
 
+const UNCERTAIN_RESULT = 'The task may still be running; check its status before submitting it again to avoid duplicate provider charges.';
+
 async function request<T>(route: string, data: object = {}, signal?: AbortSignal): Promise<IpcResult<T>> {
   try {
     const response = await fetch(`/api/lingvoice/${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal });
-    return await response.json() as IpcResult<T>;
+    let result: unknown;
+    try { result = await response.json(); }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      const detail = response.ok
+        ? 'The local Web response was incomplete or invalid.'
+        : `The local Web request failed (HTTP ${response.status}); the server or proxy did not return a valid API response.`;
+      return { ok: false, error: `${detail} ${UNCERTAIN_RESULT}` };
+    }
+    if (result && typeof result === 'object' && 'ok' in result && typeof result.ok === 'boolean') {
+      if (!result.ok && 'error' in result && typeof result.error === 'string') return result as IpcResult<T>;
+      if (result.ok && response.ok) return result as IpcResult<T>;
+    }
+    return { ok: false, error: `The local Web service returned an unexpected response (HTTP ${response.status}). ${UNCERTAIN_RESULT}` };
   } catch {
     if (signal?.aborted) return { ok: false, error: 'Task cancelled.' };
-    return { ok: false, error: 'Local Web service is unavailable. Restart npm run web.', errorKey: 'errors.webService' };
+    return { ok: false, error: `The connection to the local Web service was interrupted. Check that npm run web is running and that the page is connected. ${UNCERTAIN_RESULT}` };
   }
 }
 
@@ -60,6 +75,10 @@ export function installWebMock(): void {
       return () => events.close();
     },
     runtime: 'browser',
+    history: () => request('history'),
+    saveHistoryTask: task => request('history-save', task),
+    deleteHistoryTask: id => request('history-delete', { id }),
+    selectHistoryTask: id => request('history-select', { id }),
     providers: () => request('providers'),
     saveProvider: update => request('provider-save', update),
     providerModels: id => request('provider-models', { id }),
@@ -117,6 +136,8 @@ export function installWebMock(): void {
     saveTranslationConfig: update => request('translation-save', update),
     translationModels: () => request('translation-models'),
     translateSubtitles: payload => request('translation-run', payload),
+    summarizeTranslation: payload => request('translation-memory', payload),
+    reviewTranslation: payload => request('translation-review', payload),
     state: async () => {
       const result = await request<import('../shared/contracts').AppState>('state');
       const locale = localStorage.getItem('lingvoice.locale');

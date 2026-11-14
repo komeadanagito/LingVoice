@@ -2,11 +2,12 @@
   "name": "lingvoice-downloader",
   "version": "0.1.0",
   "private": true,
+  "engines": { "node": ">=22.13.0" },
   "description": "另一声",
   "main": "dist/src/main/index.js",
   "scripts": {
     "start": "npm run build && electron .",
-    "dev": "npm run build:electron && concurrently -k -s first \"vite\" \"wait-on http://localhost:45173 && cross-env LINGVOICE_DEV=1 electron .\"",
+    "dev": "npm run build:electron && concurrently -k -s first \"vite\" \"wait-on http://localhost:45173 && node -e \\\"if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) { console.log('[LingVoice] 当前为无图形桌面 Linux 环境，已启用 Web 模式: http://localhost:45173/'); setInterval(() => {}, 3600000); } else { const { spawn } = require('child_process'); const args = process.platform === 'linux' && process.getuid && process.getuid() === 0 ? ['.', '--no-sandbox'] : ['.']; const p = spawn('electron', args, { stdio: 'inherit', shell: true, env: { ...process.env, LINGVOICE_DEV: '1' } }); p.on('exit', c => process.exit(c ?? 0)); }\\\"\"",
     "web": "vite --open",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run check && npm run build:electron && vite build",

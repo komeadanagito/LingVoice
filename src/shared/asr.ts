@@ -9,9 +9,9 @@ export interface AsrSettings {
 
 export const defaultAsrSettings: AsrSettings = {
   providerId: '',
-  baseUrl: 'https://api.openai.com/v1',
+  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   fullUrl: false,
-  model: 'whisper-1',
+  model: 'qwen-audio-3.1-asr-flash',
   language: '',
   prompt: '',
 };

@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { spawn } from 'node:child_process';
-import { AsrService, asrEndpoint, pcmWav, parseAsrSegments } from '../src/main/asr';
+import { AsrService, asrEndpoint, pcmWav, parseAsrSegments, gateNonVoicedPcm } from '../src/main/asr';
 import { defaultAsrSettings, type AsrSettings, type AsrRequest, type AsrProgress } from '../src/shared/asr';
 
 const vault = {
@@ -68,7 +68,9 @@ test('ASR config copies defaults and encrypts, retains, reloads and clears crede
     const initial = await service.getConfig();
     assert.deepEqual(initial, { settings: defaultAsrSettings, hasApiKey: false });
     initial.settings.model = 'mutated';
-    assert.equal((await service.getConfig()).settings.model, 'whisper-1');
+    assert.equal((await service.getConfig()).settings.model, 'qwen-audio-3.1-asr-flash');
+    assert.equal(initial.settings.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+    assert.equal(initial.settings.fullUrl, false);
     const saved = await service.saveConfig({ settings: settings(), apiKey: 'private-api-key' });
     assert.deepEqual(saved, { settings: defaultAsrSettings, hasApiKey: true });
     const disk = await fs.readFile(file, 'utf8');
@@ -78,6 +80,17 @@ test('ASR config copies defaults and encrypts, retains, reloads and clears crede
     assert.deepEqual(await reload.getConfig(), saved);
     assert.equal((await reload.saveConfig({ settings: settings({ model: 'new' }) })).hasApiKey, true);
     assert.equal((await reload.saveConfig({ settings: settings(), apiKey: '' })).hasApiKey, false);
+  });
+});
+
+test('legacy ASR fullUrl remains readable but is always persisted as false', async () => {
+  await fixture(async ({ service, file }) => {
+    const saved = await service.saveConfig({ settings: settings({ baseUrl: 'https://example.com/v1/audio/transcriptions', fullUrl: true }) });
+    assert.equal(saved.settings.fullUrl, false);
+    assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).settings.fullUrl, false);
+    const reloaded = new AsrService(file, vault, '', () => {});
+    assert.equal((await reloaded.getConfig()).settings.fullUrl, false);
+    assert.equal(asrEndpoint((await reloaded.getConfig()).settings), 'https://example.com/v1/chat/completions');
   });
 });
 
@@ -138,13 +151,16 @@ test('FFmpeg launch and exit errors are sanitized and release the busy lock', as
   });
 });
 
-test('endpoint supports base URLs, proxy prefixes, versions, queries and explicit full URLs', () => {
+test('endpoint supports compatible chat URLs, proxy prefixes, versions, queries and legacy transcription URLs', () => {
   for (const [baseUrl, fullUrl, expected] of [
-    ['https://example.com', false, 'https://example.com/v1/audio/transcriptions'],
-    ['https://example.com/v1/', false, 'https://example.com/v1/audio/transcriptions'],
-    ['https://example.com/proxy', false, 'https://example.com/proxy/v1/audio/transcriptions'],
-    ['https://example.com/proxy/v2?api-version=1', false, 'https://example.com/proxy/v2/audio/transcriptions?api-version=1'],
-    ['http://localhost:1234/custom?version=x', true, 'http://localhost:1234/custom?version=x'],
+    ['https://example.com', false, 'https://example.com/compatible-mode/v1/chat/completions'],
+    ['https://example.com/v1/', false, 'https://example.com/v1/chat/completions'],
+    ['https://example.com/proxy', false, 'https://example.com/proxy/compatible-mode/v1/chat/completions'],
+    ['https://example.com/proxy/v2?api-version=1', false, 'https://example.com/proxy/v2/chat/completions?api-version=1'],
+    ['https://example.com/v1/audio/transcriptions?version=x', true, 'https://example.com/v1/chat/completions?version=x'],
+    ['https://example.com/proxy/v2/audio/transcriptions', false, 'https://example.com/proxy/v2/chat/completions'],
+    ['https://example.com/compatible-mode/v1', true, 'https://example.com/compatible-mode/v1/chat/completions'],
+    ['https://example.com/v1/chat/completions', true, 'https://example.com/v1/chat/completions'],
   ] as const) assert.equal(asrEndpoint(settings({ baseUrl, fullUrl })), expected);
   for (const baseUrl of ['file:///tmp/a', 'ftp://example.com', 'https://user:key@example.com', 'https://example.com/#', 'not-url']) {
     assert.throws(() => asrEndpoint(settings({ baseUrl })), /Invalid/);
@@ -185,31 +201,36 @@ test('timestamp parser rejects text-only and malformed data instead of fabricati
   assert.throws(() => parseAsrSegments({ segments: Array(100001).fill({ start: 0, end: 1, text: 'hello' }) }, 1), /too many/);
 });
 
-test('multipart upload sends saved fields and WAV chunks with exact byte-based offsets', async t => {
+test('JSON chat upload sends saved fields and WAV chunks with exact byte-based offsets', async t => {
   let calls = 0;
   mockFetch(t, async (url, init) => {
-    assert.equal(url, 'https://example.com/v1/audio/transcriptions');
+    assert.equal(url, 'https://example.com/v1/chat/completions');
     assert.equal(init.redirect, 'error');
-    assert.equal((init.headers as Record<string, string>).Authorization, 'Bearer private-api-key');
+    assert.deepEqual(init.headers, { 'Content-Type': 'application/json', Authorization: 'Bearer private-api-key' });
     assert.ok(init.signal);
-    const form = init.body as FormData;
-    assert.equal(form.get('model'), 'custom-whisper');
-    assert.equal(form.get('language'), 'zh');
-    assert.equal(form.get('prompt'), 'Names');
-    assert.equal(form.get('response_format'), 'verbose_json');
-    assert.deepEqual(form.getAll('timestamp_granularities[]'), ['segment']);
-    const audio = form.get('file') as File;
-    assert.equal(audio.type, 'audio/wav');
-    assert.equal(audio.name, 'audio.wav');
-    assert.equal(audio.size, (calls === 0 ? 9600000 : 48000) + 44);
-    const header = Buffer.from(await audio.arrayBuffer());
-    assert.equal(header.readUInt32LE(40), audio.size - 44);
+    const body = JSON.parse(init.body as string);
+    const audio = body.messages[1].content[0];
+    assert.equal(audio.type, 'input_audio');
+    assert.match(audio.input_audio.data, /^data:audio\/wav;base64,/);
+    const wav = Buffer.from(audio.input_audio.data.split(',')[1], 'base64');
+    assert.deepEqual(body, {
+      model: 'custom-asr',
+      messages: [
+        { role: 'system', content: 'Names' },
+        { role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${wav.toString('base64')}` } }] },
+      ],
+      stream: false,
+      asr_options: { enable_itn: false, language: 'zh' },
+    });
+    assert.equal(wav.length, (calls === 0 ? 9600000 : 48000) + 44);
+    assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
+    assert.equal(wav.readUInt32LE(40), wav.length - 44);
     calls++;
     return { segments: [{ start: 0.25, end: 1.25, text: ` chunk ${calls} ` }] };
   });
   await fixture(async ({ service, media, progress, setSize }) => {
     setSize(9600000 + 48000);
-    await service.saveConfig({ settings: settings({ baseUrl: 'https://example.com/v1', model: 'custom-whisper', language: 'zh', prompt: 'Names' }), apiKey: 'private-api-key' });
+    await service.saveConfig({ settings: settings({ baseUrl: 'https://example.com/v1', model: 'custom-asr', language: 'zh', prompt: 'Names' }), apiKey: 'private-api-key' });
     assert.deepEqual(await service.transcribe({ file: media }), [
       { id: 1, start: 0.25, end: 1.25, text: 'chunk 1' }, { id: 2, start: 300.25, end: 301.25, text: 'chunk 2' },
     ]);
@@ -219,10 +240,53 @@ test('multipart upload sends saved fields and WAV chunks with exact byte-based o
   assert.equal(calls, 2);
 });
 
+test('saved Qwen 3.1 model survives reload, connection test and transcription without falling back to the default model', async t => {
+  await fixture(async ({ service, file, media }) => {
+    await service.saveConfig({ settings: settings({ model: 'qwen-audio-3.1-asr-flash' }) });
+    const reloaded = new AsrService(file, vault, '', () => {});
+    assert.equal((await reloaded.getConfig()).settings.model, 'qwen-audio-3.1-asr-flash');
+    let calls = 0;
+    mockFetch(t, (_url, init) => {
+      calls++;
+      assert.equal(JSON.parse(init.body as string).model, 'qwen-audio-3.1-asr-flash');
+      return segments();
+    });
+    await reloaded.test();
+    await service.transcribe({ file: media });
+    assert.equal(calls, 2);
+  });
+});
+
+test('DashScope native endpoint retry preserves the selected Qwen 3.1 model', async t => {
+  await fixture(async ({ service, media }) => {
+    await service.saveConfig({ settings: settings({ model: 'qwen-audio-3.1-asr-flash' }) });
+    const urls: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      urls.push(String(url));
+      const body = JSON.parse(init.body as string);
+      assert.equal(body.model, 'qwen-audio-3.1-asr-flash');
+      if (urls.length % 2 === 1) return new Response('', { status: 400 });
+      assert.ok(Array.isArray(body.input.messages));
+      return Response.json(segments());
+    });
+    await service.test();
+    await service.transcribe({ file: media });
+    assert.deepEqual(urls, [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    ]);
+  });
+});
+
 test('automatic language and empty prompt are omitted, valid silence gives explicit no-speech error', async t => {
   mockFetch(t, (_url, init) => {
-    const form = init.body as FormData;
-    assert.equal(form.has('language'), false); assert.equal(form.has('prompt'), false);
+    const body = JSON.parse(init.body as string);
+    assert.deepEqual(body.asr_options, { enable_itn: false });
+    assert.equal(body.messages.length, 1);
+    assert.equal(body.messages[0].role, 'user');
+    assert.equal(body.stream, false);
     assert.equal((init.headers as Record<string, string>).Authorization, undefined);
     return { segments: [] };
   });
@@ -348,6 +412,65 @@ test('provider failures, bounded responses and invalid JSON never reveal bodies 
   });
 });
 
+test('ASR distinguishes safe transport causes and malformed JSON without disclosing raw exceptions', async t => {
+  let code = '';
+  t.mock.method(globalThis, 'fetch', async () => {
+    if (code === 'json') return new Response('private-response-not-json');
+    throw new TypeError('private-url-with-api-key', { cause: Object.assign(new Error('private-provider-message'), { code }) });
+  });
+  await fixture(async ({ service }) => {
+    await service.saveConfig({ settings: settings(), apiKey: 'private-api-key' });
+    for (const [next, expected] of [
+      ['ENOTFOUND', /DNS lookup failed/], ['EAI_AGAIN', /DNS lookup failed/],
+      ['ECONNREFUSED', /Connection refused/], ['ECONNRESET', /Connection interrupted/],
+      ['UND_ERR_CONNECT_TIMEOUT', /timed out/], ['UND_ERR_BODY_TIMEOUT', /timed out/],
+      ['CERT_HAS_EXPIRED', /TLS certificate verification failed/],
+      ['PRIVATE_UNKNOWN_CODE', /without usable HTTP error details/], ['json', /invalid or incomplete JSON/],
+    ] as const) {
+      code = next;
+      await assert.rejects(service.test(), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, expected);
+        assert.ok(!error.message.includes('private-') && !error.message.includes('PRIVATE_UNKNOWN_CODE'));
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+    }
+  });
+});
+
+test('ASR exposes structured provider errors with credentials redacted', async t => {
+  let payload: unknown;
+  t.mock.method(globalThis, 'fetch', async () => Response.json(payload, { status: 400 }));
+  await fixture(async ({ service }) => {
+    await service.saveConfig({ settings: settings(), apiKey: 'private-api-key' });
+    for (payload of [
+      { Code: 'InvalidParameter', Message: 'Invalid audio private-api-key Bearer secret-token' },
+      { code: 'InvalidParameter', message: 'Invalid audio private-api-key Bearer secret-token' },
+      { error: { code: 'InvalidParameter', message: 'Invalid audio private-api-key Bearer secret-token' } },
+    ]) {
+      await assert.rejects(service.test(), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /HTTP 400.*InvalidParameter.*Invalid audio/);
+        assert.ok(!error.message.includes('private-api-key'));
+        assert.ok(!error.message.includes('secret-token'));
+        return true;
+      });
+    }
+    payload = { Code: 'InvalidModel' };
+    await assert.rejects(service.test(), /HTTP 400.*InvalidModel/);
+  });
+});
+
+test('Qwen no-speech rejection passes connection test but produces no invented subtitles', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ Code: 'CLIENT_ERROR', Message: 'ASR_RESPONSE_HAVE_NO_WORDS' }, { status: 400 }));
+  await fixture(async ({ service, media }) => {
+    await service.saveConfig({ settings: settings(), apiKey: 'key' });
+    await service.test();
+    await assert.rejects(service.transcribe({ file: media }), /No speech found/);
+  });
+});
+
 test('invalid timestamp response stops later chunks and cleans up', async t => {
   let calls = 0;
   mockFetch(t, () => { calls++; return { text: 'private-body' }; });
@@ -380,14 +503,48 @@ test('service.test and transcribe work with custom Base URL without a providerId
   });
   await fixture(async ({ service, media }) => {
     await service.saveConfig({
-      settings: settings({ providerId: '', baseUrl: 'https://custom-asr.example/v1', model: 'custom-whisper' }),
+      settings: settings({ providerId: '', baseUrl: 'https://custom-asr.example/v1', model: 'custom-asr' }),
       apiKey: 'custom-secret',
     });
     await service.test();
-    assert.equal(requestedUrl, 'https://custom-asr.example/v1/audio/transcriptions');
+    assert.equal(requestedUrl, 'https://custom-asr.example/v1/chat/completions');
 
     const cues = await service.transcribe({ file: media });
     assert.equal(cues[0].text, 'Custom ASR');
   });
 });
+
+test('proportional ASR segments align to voiced PCM windows and filter out BGM hallucinations', () => {
+  // 10s buffer at 16 kHz mono 16-bit PCM: 0..3s silence/BGM, 3..7s speech, 7..10s silence/BGM
+  const duration = 10;
+  const samples = duration * 16000;
+  const pcm = new Uint8Array(samples * 2);
+  const view = new DataView(pcm.buffer);
+  for (let i = 3 * 16000; i < 7 * 16000; i++) {
+    view.setInt16(i * 2, Math.round(Math.sin(i * 2 * Math.PI * 300 / 16000) * 8000), true);
+  }
+  const parsed = {
+    _proportional: true,
+    segments: [
+      { start: 0, end: 0.5, text: '♪ [音乐] 第一句台词' },
+      { start: 0.5, end: 1.0, text: '第二句台词 (Music)' },
+    ],
+  };
+  const cues = parseAsrSegments(parsed, duration, 0, pcm);
+  assert.equal(cues.length, 2);
+  assert.equal(cues[0].text, '第一句台词');
+  assert.equal(cues[1].text, '第二句台词');
+  assert.ok(cues[0].start >= 2.8, `expected speech start >= 2.8s, got ${cues[0].start}`);
+  assert.ok(cues[1].end <= 7.2, `expected speech end <= 7.2s, got ${cues[1].end}`);
+
+  // Verify VAD gating attenuates BGM in non-voiced intervals (e.g. at 1.0s) while preserving speech at 5.0s
+  for (let i = 0; i < 2 * 16000; i++) {
+    view.setInt16(i * 2, 400, true); // Low-level BGM floor in 0..2s
+  }
+  const gated = gateNonVoicedPcm(pcm, duration);
+  const gatedView = new DataView(gated.buffer, gated.byteOffset, gated.byteLength);
+  assert.ok(Math.abs(gatedView.getInt16(16000 * 2, true)) <= 15, 'non-voiced BGM interval should be attenuated');
+  assert.equal(gatedView.getInt16(5 * 16000 * 2 + 20, true), view.getInt16(5 * 16000 * 2 + 20, true), 'active speech interval should remain intact');
+});
+
 

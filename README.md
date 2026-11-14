@@ -9,7 +9,7 @@ Windows 桌面原型，先适配哔哩哔哩普通投稿视频。技术栈为 **
 
 ## 启动
 
-开发环境需要 **Node.js 22.12+ 或更新的 LTS 版本**（含 npm），在项目目录执行：
+开发环境需要 **Node.js 22.13+ 或更新的 LTS 版本**（含 npm；历史记录使用内置 `node:sqlite`），在项目目录执行：
 
 ```powershell
 npm install
@@ -18,13 +18,22 @@ npm run dev
 
 `npm run dev` 启动 Vite 和 Electron，前端修改可热更新；修改主进程或预加载脚本后需要停止并重新运行。开发服务器地址为 `http://localhost:45173`，主机名和端口集中在 `src/shared/dev-server.ts`，改动后 `npm run dev`、`npm run web` 与主进程同步生效。
 
-`npm run web` 只启动同一个开发服务器并自动打开浏览器，用于在不启动 Electron 的情况下查看界面。浏览器里没有预加载脚本，解析、下载、选择目录等本机能力由前端假数据（`src/renderer/web-mock.ts`，仅开发环境且缺少预加载脚本时加载）顶替：不会连接 B 站，也不会真正写入文件，侧栏版本号显示为 `web`，点「开始下载」只会模拟一段进度。它适合检查布局、文案和各状态样式，不能代替真实下载验证。
+`npm run web` 启动本地 Web 服务并自动打开浏览器。`src/renderer/web-mock.ts` 虽保留历史命名，实际通过同源 HTTP 接口连接 `scripts/browser-backend.ts`，解析、下载、识别、翻译、配音和 SQLite 历史记录都在 Node 服务端处理，不是模拟数据。服务默认只接受指定本地来源的请求，请勿未经额外认证与部署加固直接暴露到公网。
 
 `npm start` 会先构建 TypeScript 和 React，再启动本地构建版本，不依赖开发服务器。
 
 也可双击 `启动下载器.bat`。首次安装需要下载 Electron 和 FFmpeg；首次解析视频会从 yt-dlp 官方 GitHub Release 下载 `yt-dlp.exe`，并核对官方 SHA-256 校验值。请确保网络能够访问 GitHub 及其文件下载域名。该组件存储于应用用户数据目录，不会重复下载。
 
 如果 npm 提示阻止了安装脚本，执行 `npm approve-scripts`，仅审核允许 Electron、ffmpeg-static 等本项目所需组件后重新安装。请勿盲目允许陌生包的脚本。
+
+## 历史记录与 SQLite
+
+- 任务列表、字幕时间轴与译文、显示设置、配音结果引用和上次选中的任务 ID 都保存在 SQLite。Web 版默认数据库为 `~/.lingvoice/web/history.sqlite`；桌面版为 Electron 用户数据目录（`app.getPath('userData')`）下的 `history.sqlite`。两种运行方式各用自己的数据库，不自动互相同步。
+- 视频不作为大 BLOB 放进 SQLite。Web 版打开的本地视频会保存到服务端 `~/.lingvoice/web/task-media/`，最大 512 MB；下载的视频和生成的配音继续留在各自输出目录。数据库保存服务端签发的媒体引用，`media-handles/` 保存对应的访问映射。桌面版打开的原视频保存其原始路径。
+- 写入采用 SQLite 事务和 WAL；成功提交后结束“正在保存”状态，成功时不显示常驻提示；写入失败会显示错误。清除浏览器缓存、IndexedDB 或 localStorage 不会删除 SQLite 中已经保存的任务。同一 Web 服务的不同浏览器可以读取同一份列表，但这不是账号云同步；桌面版与 Web 版亦不共用任务库。
+- 首次升级会读取当前浏览器旧的 `lingvoice-tasks` IndexedDB，按原 ID 导入 SQLite，并将旧的本地视频上传到服务端。每条任务确认提交成功后才从旧的 `tasks` 集合移到 `migrated-tasks` 备份集合；失败时保留原始数据并提示，重新加载可继续迁移，已存在的任务不会重复导入。旧浏览器数据仍需在原来的网站地址与浏览器中打开才能迁移。
+- 删除历史任务仅删除数据库记录，磁盘视频和导出文件会保留。正在运行的识别、翻译、配音请求不是持久化后台队列；刷新可恢复已保存结果，不能恢复尚未返回的请求。
+- 备份时先关闭桌面应用或停止 Web 服务，再备份数据库、媒体引用目录、视频及配音输出文件。运行时 SQLite 可能有 `history.sqlite-wal` / `history.sqlite-shm`，不要只复制正在使用的主数据库文件；仅备份 SQLite 也不会包含视频本体。
 
 ## Provider、字幕翻译与语音识别
 
@@ -43,11 +52,21 @@ npm run dev
 2. 确认上传提示后，本地 FFmpeg 提取单声道 16 kHz 音频，按 5 分钟分段上传到所选 ASR Provider；分段时间戳会自动还原到视频时间轴，最长支持 6 小时。
 3. OpenAI 兼容 ASR 需要支持 `verbose_json` 和 `segments` 时间戳，建议先使用 `whisper-1`。仅返回纯文本的接口 / 模型不能生成同步字幕，应用会提示失败，不会编造时间轴。
 4. 识别成功后原文字幕显示在视频上，再点击「翻译字幕」生成译文。也可以直接导入 SRT / VTT 跳过识别。
-5. 支持双语、仅译文、仅原文或关闭字幕，调整字号和延迟，并导出 SRT。没有译文的字幕回退到原文；字幕保存在当前会话中，请导出以长期保存。
+5. 支持双语、仅译文、仅原文或关闭字幕，调整字号和延迟，并导出 SRT。没有译文的字幕回退到原文；字幕随任务自动保存到 SQLite，也建议导出重要字幕作为独立备份。
 
 音频 / 字幕会发送到你配置的服务，可能收费；远程服务应使用 HTTPS。ASR 支持停止：中断提取 / 当前请求，清理临时音频并停止后续分段；已经发送的请求仍可能计费。翻译停止会忽略在途结果并停止后续批次。
 
 **当前边界**：只支持本地 / 下载后的视频；平台 iframe 无法直接读取播放时间，暂不支持同步。尚未接入平台字幕自动提取、本地离线 ASR 和配音替换。浏览器预览可导入和显示原文字幕，服务配置与识别 / 翻译需要桌面版。
+
+### Token Plan 视频配音
+
+- 在「设置 → 视频配音服务 · TTS」填写 `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`，选择套餐实际开放的模型。当前 Token Plan 官方文档列出 `qwen-audio-3.0-tts-plus`；密钥使用该套餐对应的 API Key，不能与普通百炼业务空间的密钥、音色混用。
+- 主界面的「配音」使用这里保存的地址、模型和密钥，不会被旧的独立配音配置悄悄覆盖，也不会把 3.0 自动换成 3.1。地址会转换为同一域名的 `/api/v1`：合成调用 `/services/audio/tts/SpeechSynthesizer`，复刻调用 `/services/audio/tts/customization`，不会把语音请求发到 `/chat/completions`。
+- 客户端同时处理直接返回的 24 kHz PCM WAV 和标准 `output.audio.url` 响应。音频大小、WAV 格式、下载主机、公开 IP、TLS 校验和禁止重定向的限制仍保留；不会自动重试可能计费的合成请求。
+- 普通合成测试使用系统音色，不代表账号支持 `voice-enrollment` 音色复刻。Token Plan 多模态文档描述普通语音合成，但未明确承诺复刻接口权限。若复刻返回 403/404，按错误提示检查套餐权限或使用明确支持复刻的业务空间；程序不会擅自换成系统音色，也不会把套餐密钥发往其他域名。
+- Token Plan 的适用工具、允许的调用场景、模型与额度以订阅条款为准；接口适配不会扩展账号本身的权限。
+
+参考：[Token Plan 多模态接入](https://help.aliyun.com/en/model-studio/token-plan-multimodal-gen)、[声音复刻](https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide)。
 
 ### 扩展 Provider
 
@@ -126,9 +145,12 @@ npm run icon         # 从现有 SVG 重新生成 Windows 图标
 - `src/shared/contracts.ts`：前后端共享的请求、返回值与事件类型。
 - `src/shared/dev-server.ts`：Vite 开发服务器的主机名与端口，`npm run dev` 和 `npm run web` 共用。
 - `src/shared/i18n/`：共享语言注册表、中英文词条、主进程翻译及可本地化错误。
+- `src/main/history.ts`：SQLite 任务存储、事务、数据校验与上次任务选择。
+- `src/shared/history.ts`：共享任务、字幕快照与历史列表类型。
+- `src/renderer/utils/task-history.ts`：历史接口调用与旧 IndexedDB 迁移。
 - `src/main/settings.ts`：保存目录与语言偏好的串行、原子持久化。
 - `src/renderer/i18n.ts`：React 国际化实例与类型化 `useI18n()` Hook。
-- `src/renderer/web-mock.ts`：浏览器预览模式的假接口，仅开发环境且没有预加载脚本时加载。
+- `src/renderer/web-mock.ts`：浏览器到本地 Web 服务的真实接口桥接，仅开发环境且没有预加载脚本时加载。
 - `src/renderer/components/LanguageSwitcher.tsx`：语言切换入口。
 - `src/renderer/App.tsx`、`components/`：React 主界面与组件。
 - `src/renderer/hooks/useDownloader.ts`：解析、下载、进度、取消等 React 状态管理。

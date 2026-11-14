@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TranslationService } from '../src/main/translation';
-import { defaultTranslationSettings, type TranslationSettings, type TranslationRequest } from '../src/shared/translation';
+import { defaultTranslationSettings, translationWindow, type TranslationSettings, type TranslationRequest } from '../src/shared/translation';
 
 const vault = {
   encrypt: (value: string) => `encrypted:${Buffer.from(value).toString('base64')}`,
@@ -83,7 +83,7 @@ test('runtime settings, keys, URLs and request limits are validated before netwo
       await assert.rejects(service.saveConfig({ settings: configured(patch as Partial<TranslationSettings>) }), /Invalid/);
     }
     await assert.rejects(service.saveConfig({ settings: configured(), apiKey: 12 as unknown as string }), /Invalid/);
-    for (const request of [null, {}, { texts: [] }, { texts: [''] }, { texts: ['  '] }, { texts: [1] }, { texts: Array(41).fill('x') }, { texts: ['x'.repeat(20001)] }, { texts: ['x'.repeat(10001), 'x'.repeat(10000)] }, { texts: ['x'], settings: {} }]) {
+    for (const request of [null, {}, { texts: [] }, { texts: [''] }, { texts: ['  '] }, { texts: [1] }, { texts: Array(41).fill('x') }, { texts: ['x'.repeat(20001)] }, { texts: ['x'.repeat(10001), 'x'.repeat(10000)] }, { texts: ['x'], settings: {} }, { texts: ['x'], context: [{ source: 'a' }] }, { texts: ['x'], lookahead: [''] }]) {
       await assert.rejects(service.translate(request as TranslationRequest));
     }
     await service.saveConfig({ settings: configured({ baseUrl: 'http://localhost:1234' }) });
@@ -105,6 +105,42 @@ test('chat batches ordered input and parses fenced arrays using saved settings a
     await service.saveConfig({ settings: configured({ baseUrl: 'https://example.com/proxy/', model: 'my-model' }), apiKey: 'private-key' });
     assert.deepEqual(await service.translate({ texts: ['Hello\nworld', 'Goodbye'] }), ['你好\n世界', '再见']);
   });
+});
+
+test('chat translation sends a rolling window of preceding pairs and lookahead lines', async t => {
+  mockFetch(t, (_url, init) => {
+    const body = JSON.parse(init.body as string);
+    assert.match(body.messages[0].content, /preceding already-translated/);
+    assert.deepEqual(JSON.parse(body.messages[1].content), {
+      preceding: [{ source: 'Hello', translated: '你好' }],
+      translate: ['Next'],
+      following: ['Later'],
+    });
+    return chat('["下一条"]');
+  });
+  await fixture(async service => {
+    await service.saveConfig({ settings: configured({ baseUrl: 'https://example.com/proxy/' }), apiKey: 'private-key' });
+    assert.deepEqual(await service.translate({
+      texts: ['Next'],
+      context: [{ source: 'Hello', translated: '你好' }],
+      lookahead: ['Later'],
+    }), ['下一条']);
+  });
+});
+
+test('translationWindow keeps the last translated cues and a short lookahead', () => {
+  const cues = [
+    { text: 'A', translated: '甲' },
+    { text: 'B', translated: '乙' },
+    { text: 'C' },
+    { text: 'D' },
+    { text: 'E' },
+  ];
+  assert.deepEqual(translationWindow(cues, 2, 4), {
+    context: [{ source: 'A', translated: '甲' }, { source: 'B', translated: '乙' }],
+    lookahead: ['E'],
+  });
+  assert.deepEqual(translationWindow(cues, 0, 2), { context: [], lookahead: ['C', 'D', 'E'] });
 });
 
 test('base URLs normalize v1, full endpoints are preserved, and model lists derive sibling endpoints', async t => {
@@ -234,5 +270,33 @@ test('corrupt persisted data and vault failures produce sanitized errors', async
     await fs.writeFile(file, JSON.stringify({ settings: configured(), apiKey: 'bad ciphertext', machineKey: '' }));
     const reload = new TranslationService(file, vault);
     await assert.rejects(reload.models(), /Unable to decrypt/);
+  });
+});
+
+test('Aliyun DashScope review normalizes /api/v1 to /compatible-mode/v1 and parses ASR corrections and BGM flags', async t => {
+  let requestedUrl = '';
+  mockFetch(t, url => {
+    requestedUrl = url;
+    return chat(JSON.stringify([
+      { id: 1, translated: '', bgm: true },
+      { id: 2, text: '今天我们来测评这款芯片', translated: "Today we're testing this chip." },
+    ]));
+  });
+  await fixture(async service => {
+    await service.saveConfig({
+      settings: configured({ baseUrl: 'https://dashscope.aliyuncs.com/api/v1', model: 'qwen-plus', targetLanguage: 'en' }),
+      apiKey: 'dashscope-key',
+    });
+    const patches = await service.review({
+      cues: [
+        { id: 1, text: 'la la la music', translated: 'la la la music', duration: 2.0 },
+        { id: 2, text: '今天我们来侧评这款新片', translated: 'Today we are evaluating this new film.', duration: 2.5 },
+      ],
+    });
+    assert.equal(requestedUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+    assert.deepEqual(patches, [
+      { id: 1, translated: '', bgm: true },
+      { id: 2, text: '今天我们来测评这款芯片', translated: "Today we're testing this chip." },
+    ]);
   });
 });

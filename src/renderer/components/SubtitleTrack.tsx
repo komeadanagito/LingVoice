@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
-import { activeSubtitles, exportSubtitles, parseSubtitles, subtitleBatches, type SubtitleCue } from '../utils/subtitles';
+import { advanceTranslationMemory, translationWindow, type TranslationMemoryState } from '../../shared/translation';
+import { activeSubtitles, exportSubtitles, subtitleBatches, type SubtitleCue } from '../utils/subtitles';
+import type { DubbingResult } from '../../shared/dubbing';
+import { filePathToMediaUrl } from '../utils/media';
+import { Icon } from './Icon';
+import type { SavedSubtitles } from '../utils/task-history';
 import { Select, type SelectOption } from './Select';
-import { DubbingPanel } from './DubbingPanel';
 
 function formatTimestamp(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
@@ -17,26 +21,32 @@ function formatTimestamp(seconds: number): string {
 }
 
 type Mode = 'bilingual' | 'original' | 'translated' | 'off';
+type SubtitleStage = 'recognize' | 'translate' | 'dub';
 
-export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime: number, localPath: string, onSeek?: (time: number) => void) {
+export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime: number, localPath: string, onSeek?: (time: number) => void, saved?: SavedSubtitles, onSave?: (snapshot: SavedSubtitles) => void, sourceKey?: string) {
   const { locale } = useI18n();
   const zh = locale === 'zh-CN';
-  const [cues, setCues] = useState<SubtitleCue[]>([]);
-  const [mode, setMode] = useState<Mode>('bilingual');
-  const [name, setName] = useState('');
+  const [cues, setCues] = useState<SubtitleCue[]>(saved?.cues ?? []);
+  const [mode, setMode] = useState<Mode>(saved?.mode ?? 'bilingual');
+  const [name, setName] = useState(saved?.name ?? '');
   const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<SubtitleStage | null>(null);
+  const translationFingerprint = useRef(saved?.translationFingerprint ?? '');
+  const mediaKey = sourceKey || `${videoSrc}|${embedSrc}`;
+  const previousSource = useRef(mediaKey);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
-  const [offset, setOffset] = useState(0);
-  const [fontSize, setFontSize] = useState(22);
+  const [offset, setOffset] = useState(saved?.offset ?? 0);
+  const [fontSize, setFontSize] = useState(saved?.fontSize ?? 22);
   const [search, setSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
+  const [result, setResult] = useState<DubbingResult | null>(saved?.result ?? null);
   const listRef = useRef<HTMLDivElement>(null);
   const generation = useRef(0);
   const running = useRef(false);
   const recognizing = useRef(false);
-  const [confirmAsr, setConfirmAsr] = useState(false);
-  const input = useRef<HTMLInputElement>(null);
+  const dubbingJob = useRef<string | null>(null);
+  const lastSnapshot = useRef<SavedSubtitles>({ cues, mode, name, offset, fontSize, result, translationFingerprint: translationFingerprint.current });
 
   const effectiveTime = currentTime - offset;
   const activeCue = cues.find(cue => cue.start <= effectiveTime && effectiveTime < cue.end);
@@ -56,100 +66,283 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
         (cue.translated && cue.translated.toLowerCase().includes(search.toLowerCase()))
       )
     : cues;
+
   useEffect(() => {
     generation.current++; running.current = false;
-    setCues([]); setName(''); setError(''); setProgress(''); setBusy(false); setOffset(0); setConfirmAsr(false);
+    if (previousSource.current !== mediaKey) {
+      previousSource.current = mediaKey;
+      translationFingerprint.current = '';
+      setCues([]); setName(''); setOffset(0); setResult(null);
+    }
+    setStage(null);
+    setError(''); setProgress(''); setBusy(false);
     return () => {
       generation.current++; running.current = false;
       if (recognizing.current) { recognizing.current = false; void window.lingvoice.cancelAsr().catch(() => {}); }
+      if (dubbingJob.current) {
+        const id = dubbingJob.current;
+        dubbingJob.current = null;
+        void window.lingvoice.cancelDubbing?.(id).catch(() => {});
+      }
     };
-  }, [videoSrc, embedSrc]);
-  useEffect(() => window.lingvoice.onAsrProgress(progress => {
+  }, [mediaKey]);
+
+  useEffect(() => {
+    const snapshot: SavedSubtitles = { cues, mode, name, offset, fontSize, result, translationFingerprint: translationFingerprint.current };
+    const previous = lastSnapshot.current;
+    if (previous.cues === cues && previous.mode === mode && previous.name === name && previous.offset === offset && previous.fontSize === fontSize && previous.result === result && previous.translationFingerprint === snapshot.translationFingerprint) return;
+    lastSnapshot.current = snapshot;
+    onSave?.(snapshot);
+  }, [cues, mode, name, offset, fontSize, result, onSave]);
+
+  useEffect(() => window.lingvoice.onAsrProgress?.(progress => {
     if (!recognizing.current) return;
     setProgress(progress.stage === 'extracting'
       ? (zh ? '正在从视频提取音频…' : 'Extracting audio from video…')
       : `${zh ? '正在识别音频' : 'Transcribing audio'} ${progress.completed}/${progress.total}`);
   }), [zh]);
 
-  async function recognize() {
+  useEffect(() => window.lingvoice.onDubbingProgress?.(event => {
+    if (!dubbingJob.current || event.jobId !== dubbingJob.current) return;
+    const stageMap: Record<string, string> = {
+      preparing: zh ? '正在准备配音环境…' : 'Preparing dubbing environment…',
+      separating: zh ? '正在分离人声与背景音乐…' : 'Separating vocals and background…',
+      translating: zh ? '正在校对配音台词…' : 'Preparing spoken text…',
+      voice: zh ? '正在提取并复刻音色…' : 'Extracting and cloning voice…',
+      synthesizing: `${zh ? '正在生成配音语音' : 'Generating speech'} ${event.completed}/${event.total}`,
+      mixing: zh ? '正在混音渲染最终视频…' : 'Mixing and exporting final video…',
+    };
+    setProgress(stageMap[event.stage] || `${zh ? '配音处理中：' : 'Dubbing: '}${event.message}`);
+  }), [zh]);
+
+  async function runStage(nextStage: SubtitleStage) {
     if (running.current || !localPath) return;
+    if (nextStage !== 'recognize' && !cues.length) return;
+    if (nextStage === 'dub' && cues.some(cue => !cue.translated?.trim())) return;
     const token = ++generation.current;
-    running.current = true; recognizing.current = true; setBusy(true); setError(''); setConfirmAsr(false);
-    setProgress(zh ? '正在准备语音识别…' : 'Preparing speech recognition…');
-    try {
-      const config = await window.lingvoice.asrConfig();
-      if (token !== generation.current) return;
-      if (!config.ok) throw new Error(config.error);
-      if (!config.data.settings.providerId && !config.data.settings.baseUrl) throw new Error(zh ? '请先在设置中填写语音识别 Base URL 或选择 Provider。' : 'Configure speech recognition Base URL or select a Provider in Settings first.');
-      const result = await window.lingvoice.transcribe({ file: localPath });
-      if (token !== generation.current) return;
-      if (!result.ok) throw new Error(result.error);
-      setCues(result.data); setName('transcription.srt'); setOffset(0);
-      setProgress(zh ? '语音识别完成，可翻译字幕或直接导出。' : 'Transcription complete. Translate the subtitles or export them.');
-    } catch (error) {
-      if (token === generation.current) { setProgress(''); setError(error instanceof Error ? error.message : String(error)); }
-    } finally { if (token === generation.current) { recognizing.current = false; running.current = false; setBusy(false); } }
-  }
+    running.current = true;
+    setBusy(true);
+    setStage(nextStage);
+    setError('');
+    setResult(null);
 
-  async function importFile(file: File) {
-    const token = ++generation.current;
-    setError(''); setProgress('');
     try {
-      if (file.size > 5 * 1024 * 1024) throw new Error(zh ? '字幕文件不能超过 5 MB' : 'Subtitle file must be under 5 MB');
-      const parsed = parseSubtitles(await file.text());
-      if (generation.current !== token) return;
-      setCues(parsed); setName(file.name); setOffset(0);
-    } catch (error) { if (generation.current === token) setError(error instanceof Error ? error.message : String(error)); }
-  }
+      let workingCues: SubtitleCue[] = cues.map(cue => ({ ...cue }));
+      if (nextStage === 'recognize') {
+      setProgress(zh ? '正在准备音频识别…' : 'Preparing audio transcription…');
+      const asrConfig = await window.lingvoice.asrConfig();
+      if (token !== generation.current) return;
+      if (!asrConfig.ok) throw new Error(asrConfig.error);
+      if (!asrConfig.data.settings.providerId && !asrConfig.data.settings.baseUrl) {
+        throw new Error(zh ? '请先在「设置 - 语音识别」中填写 Base URL 或选择 Provider。' : 'Configure speech recognition Base URL or select a Provider in Settings first.');
+      }
 
-  async function translate() {
-    if (running.current) return;
-    const token = ++generation.current;
-    running.current = true; setBusy(true); setError('');
-    setCues(previous => previous.map(({ translated: _translated, ...cue }) => cue));
-    setProgress(zh ? '正在读取翻译配置…' : 'Loading translation settings…');
-    try {
-      const config = await window.lingvoice.translationConfig();
-      if (!config.ok) throw new Error(config.error);
-      if (!config.data.settings.providerId) throw new Error(zh ? '请先在设置中选择并保存字幕翻译 Provider。' : 'Choose and save a subtitle translation provider in Settings first.');
-      const fingerprint = JSON.stringify(config.data.settings);
-      const batches = subtitleBatches(cues);
+      recognizing.current = true;
+      const asrResult = await window.lingvoice.transcribe({ file: localPath });
+      recognizing.current = false;
+      if (token !== generation.current) return;
+      if (!asrResult.ok) throw new Error(asrResult.error);
+      if (!asrResult.data.length) throw new Error(zh ? '未在视频中识别到有效台词内容。' : 'No speech recognized from the video.');
+
+      workingCues = asrResult.data.map(cue => ({ ...cue }));
+      translationFingerprint.current = '';
+      setCues(workingCues);
+      setName('transcription.srt');
+      setOffset(0);
+      setProgress(zh ? `音频识别完成，共 ${workingCues.length} 条字幕。点击「翻译」继续。` : `Transcription complete: ${workingCues.length} cues. Click Translate to continue.`);
+      return;
+      }
+
+      if (nextStage === 'translate') {
+      setProgress(zh ? '正在准备字幕翻译…' : 'Preparing subtitle translation…');
+      const transConfig = await window.lingvoice.translationConfig();
+      if (token !== generation.current) return;
+      if (!transConfig.ok) throw new Error(transConfig.error);
+      if (!transConfig.data.settings.providerId) {
+        throw new Error(zh ? '请先在「设置 - 字幕翻译」中选择翻译 Provider。' : 'Choose a translation provider in Settings first.');
+      }
+
+      const fingerprint = JSON.stringify(transConfig.data.settings);
+      if (translationFingerprint.current !== fingerprint) {
+        workingCues = workingCues.map(({ translated: _translated, ...cue }) => cue);
+        setCues(workingCues);
+      }
+      translationFingerprint.current = fingerprint;
+      const batches = subtitleBatches(workingCues);
       let completed = 0;
-      for (const batch of batches) {
-        if (generation.current !== token) return;
-        // Stop if another page changed the service or language while this task was running.
+      let batchOffset = 0;
+      let memoryState: TranslationMemoryState = { memory: { summary: '', terms: [] }, through: 0 };
+
+      for (const [batchIndex, batch] of batches.entries()) {
+        if (token !== generation.current) return;
+        if (batch.every(cue => cue.translated?.trim())) {
+          batchOffset += batch.length;
+          completed += batch.length;
+          continue;
+        }
         const latest = await window.lingvoice.translationConfig();
         if (!latest.ok) throw new Error(latest.error);
-        if (JSON.stringify(latest.data.settings) !== fingerprint) throw new Error(zh ? '翻译配置已变更，请重新翻译以保持语言一致。' : 'Translation settings changed. Restart translation for consistent output.');
-        if (generation.current !== token) return;
-        setProgress(`${zh ? '翻译中' : 'Translating'} ${completed}/${cues.length}`);
-        const result = await window.lingvoice.translateSubtitles({ texts: batch.map(cue => cue.text) });
-        if (generation.current !== token) return;
-        if (!result.ok) throw new Error(result.error);
-        const translated = new Map(batch.map((cue, i) => [cue.id, result.data[i]]));
-        setCues(previous => previous.map(cue => translated.has(cue.id) ? { ...cue, translated: translated.get(cue.id) } : cue));
+        if (JSON.stringify(latest.data.settings) !== fingerprint) {
+          throw new Error(zh ? '翻译配置已变更，请重新开始以保持语言一致。' : 'Translation settings changed. Restart dubbing for consistent output.');
+        }
+
+        memoryState = await advanceTranslationMemory(workingCues, batchOffset, memoryState, async payload => {
+          if (token !== generation.current) throw new Error('Translation cancelled.');
+          setProgress(zh ? '正在压缩历史上下文并更新术语表…' : 'Summarizing earlier dialogue and updating terminology…');
+          const response = await window.lingvoice.summarizeTranslation(payload);
+          if (!response.ok) throw new Error(`${zh ? '历史摘要/术语更新失败' : 'History summary/terminology update failed'}: ${response.error}`);
+          return response.data;
+        });
+        if (token !== generation.current) return;
+        setProgress(`${zh ? '正在翻译字幕' : 'Translating subtitles'} ${completed}/${workingCues.length} · ${batchIndex + 1}/${batches.length}`);
+        const end = batchOffset + batch.length;
+        const { context, lookahead } = translationWindow(workingCues, batchOffset, end);
+        const transResult = await window.lingvoice.translateSubtitles({
+          memory: memoryState.memory,
+          texts: batch.map(cue => cue.text),
+          durations: batch.map(cue => Math.max(0.5, Number((cue.end - cue.start).toFixed(2)))),
+          ...(context.length ? { context } : {}),
+          ...(lookahead.length ? { lookahead } : {}),
+        });
+
+        if (token !== generation.current) return;
+        if (!transResult.ok) throw new Error(`${zh ? '字幕翻译失败' : 'Subtitle translation failed'} (${batchIndex + 1}/${batches.length}): ${transResult.error}`);
+
+        workingCues = workingCues.map((cue, index) => index >= batchOffset && index < end
+          ? { ...cue, translated: transResult.data[index - batchOffset] }
+          : { ...cue });
+        setCues(workingCues);
+        batchOffset = end;
         completed += batch.length;
       }
-      setProgress(`${zh ? '翻译完成' : 'Translated'} ${completed}/${cues.length}`);
-    } catch (error) { if (generation.current === token) { setError(error instanceof Error ? error.message : String(error)); setProgress(''); } }
-    finally { if (generation.current === token) { running.current = false; setBusy(false); } }
+
+      // Review-patch loop
+      const REVIEW_CHUNK = 60;
+      const MAX_ROUNDS = 2;
+      const MAX_PATCHES_PER_ROUND = 40;
+      const isMachine = transConfig.data.settings.engine === 'machine' && !transConfig.data.settings.providerId;
+
+      if (!isMachine && workingCues.length > 0) {
+        for (let round = 0; round < MAX_ROUNDS; round++) {
+          if (token !== generation.current) return;
+          setProgress(zh ? '正在审查并校对翻译一致性…' : 'Reviewing translation consistency…');
+
+          const reviewable = workingCues.filter(c => c.text && c.translated);
+          if (!reviewable.length) break;
+
+          const allPatches: { id: number; text?: string; translated: string; bgm?: boolean }[] = [];
+          for (let i = 0; i < reviewable.length; i += REVIEW_CHUNK - 10) {
+            if (token !== generation.current) return;
+            const chunk = reviewable.slice(i, i + REVIEW_CHUNK);
+            const reviewResult = await window.lingvoice.reviewTranslation({
+              memory: memoryState.memory,
+              cues: chunk.map(c => ({
+                id: c.id,
+                text: c.text,
+                translated: c.translated!,
+                duration: Math.max(0.5, Number((c.end - c.start).toFixed(2))),
+              })),
+            });
+            if (token !== generation.current) return;
+            if (!reviewResult.ok) break;
+            for (const patch of reviewResult.data) {
+              if (!allPatches.some(p => p.id === patch.id)) allPatches.push(patch);
+            }
+          }
+
+          const patches = allPatches.slice(0, MAX_PATCHES_PER_ROUND);
+          if (!patches.length) break;
+
+          const patchMap = new Map(patches.map(p => [p.id, p]));
+          const bgmIds = new Set(patches.filter(p => p.bgm).map(p => p.id));
+          if (bgmIds.size > 0 && workingCues.length > bgmIds.size) {
+            workingCues = workingCues.filter(cue => !bgmIds.has(cue.id));
+          }
+          for (const cue of workingCues) {
+            const fix = patchMap.get(cue.id);
+            if (fix) {
+              if (fix.text) cue.text = fix.text;
+              if (fix.translated) cue.translated = fix.translated;
+            }
+          }
+          workingCues = workingCues.map(cue => ({ ...cue }));
+          setCues(workingCues);
+
+          if (patches.length / reviewable.length < 0.03) break;
+        }
+      }
+
+      setProgress(zh ? '翻译和校对完成。点击「配音」生成配音视频。' : 'Translation and review complete. Click Dub to generate the video.');
+      return;
+      }
+
+      setProgress(zh ? '正在准备视频配音合成…' : 'Preparing video dubbing…');
+      const dubbingId = crypto.randomUUID();
+      dubbingJob.current = dubbingId;
+
+      const dubbingResponse = await window.lingvoice.runDubbing({
+        jobId: dubbingId,
+        file: localPath,
+        cues: workingCues.map(c => ({
+          id: c.id,
+          start: c.start,
+          end: c.end,
+          text: c.text,
+          translated: c.translated,
+          speechText: c.translated || c.text,
+        })),
+        offset,
+        backgroundVolume: 1,
+        preview: false,
+        consent: true,
+        useTtsConfig: true,
+      });
+
+      if (token !== generation.current || dubbingJob.current !== dubbingId) return;
+      if (!dubbingResponse.ok) throw new Error(dubbingResponse.error);
+
+      setResult(dubbingResponse.data);
+      setProgress(zh ? '视频配音制作完成！已自动加载并在下方提供试听与下载。' : 'Video dubbing complete! Preview and download below.');
+    } catch (err) {
+      if (token === generation.current) {
+        setProgress('');
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (token === generation.current) {
+        recognizing.current = false;
+        dubbingJob.current = null;
+        running.current = false;
+        setBusy(false);
+        setStage(null);
+      }
+    }
   }
+
   function stop() {
     if (recognizing.current) { recognizing.current = false; void window.lingvoice.cancelAsr().catch(() => {}); }
-    generation.current++; running.current = false; setBusy(false);
-    setProgress(zh ? '已停止，保留现有字幕；已发送的请求可能仍会计费。' : 'Stopped. Existing subtitles kept; requests already sent may still be billed.');
+    if (dubbingJob.current) {
+      const id = dubbingJob.current;
+      dubbingJob.current = null;
+      void window.lingvoice.cancelDubbing?.(id).catch(() => {});
+    }
+    generation.current++; running.current = false; setBusy(false); setStage(null);
+    setProgress(zh ? '已停止当前任务，保留已完成的字幕；已发送的请求可能仍会计费。' : 'Task stopped. Completed subtitles kept; requests already sent may still be billed.');
   }
+
   function download() {
     const url = URL.createObjectURL(new Blob([exportSubtitles(cues, mode === 'off' ? 'bilingual' : mode)], { type: 'text/plain;charset=utf-8' }));
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${name.replace(/\.(srt|vtt)$/i, '')}.${mode === 'off' ? 'bilingual' : mode}.srt`; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+
   const modeOptions: SelectOption[] = [
     { value: 'bilingual', label: zh ? '双语字幕' : 'Bilingual' },
     { value: 'translated', label: zh ? '仅译文' : 'Translation only' },
     { value: 'original', label: zh ? '仅原文' : 'Original only' },
     { value: 'off', label: zh ? '关闭字幕' : 'Off' },
   ];
+
   const fontOptions: SelectOption[] = [18, 22, 26, 30].map(size => ({
     value: String(size),
     label: `${size}px`,
@@ -157,11 +350,40 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
 
   const enabled = Boolean(videoSrc && !embedSrc);
   const active = mode === 'off' ? [] : activeSubtitles(cues, currentTime - offset);
+  const mediaUrl = (p: string) => window.lingvoice.runtime === 'browser' ? p : filePathToMediaUrl(p);
+
   const toolbar = <div className="subtitle-workspace">
     <div className="subtitle-toolbar">
-      <input ref={input} className="sr-only" type="file" accept=".srt,.vtt" aria-label={zh ? '导入字幕' : 'Import subtitles'} onChange={event => { const file = event.target.files?.[0]; if (file) void importFile(file); event.target.value = ''; }} disabled={!enabled || busy} />
-      <button type="button" className="choose-file-button" disabled={!enabled || busy} onClick={() => input.current?.click()}>{zh ? '导入字幕' : 'Import subtitles'}</button>
-      <button type="button" className="choose-file-button asr-start" disabled={!enabled || !localPath || busy} onClick={() => setConfirmAsr(value => !value)}>{zh ? '识别音频' : 'Transcribe audio'}</button>
+      <div className="subtitle-stage-actions" role="group" aria-label={zh ? '字幕与配音步骤' : 'Subtitle and dubbing steps'}>
+        <button
+          type="button"
+          className="choose-file-button asr-start"
+          disabled={!enabled || !localPath || busy}
+          onClick={() => void runStage('recognize')}
+          title={zh ? '仅识别音频，生成原文字幕；重新识别将替换现有字幕' : 'Transcribe audio only; running again replaces existing subtitles'}
+        >
+          <Icon name="mic" size={13} />
+          <span>{stage === 'recognize' ? (zh ? '识别中…' : 'Transcribing…') : (zh ? '音频识别' : 'Transcribe')}</span>
+        </button>
+        <button
+          type="button"
+          className="choose-file-button subtitle-translate"
+          disabled={!enabled || !localPath || busy || !cues.length}
+          onClick={() => void runStage('translate')}
+          title={zh ? '翻译并校对已有字幕，失败后重试会保留已完成批次' : 'Translate and review existing subtitles; retry keeps completed batches'}
+        >
+          <span>{stage === 'translate' ? (zh ? '翻译中…' : 'Translating…') : (zh ? '翻译' : 'Translate')}</span>
+        </button>
+        <button
+          type="button"
+          className="choose-file-button primary dubbing-main-button"
+          disabled={!enabled || !localPath || busy || !cues.length || cues.some(cue => !cue.translated?.trim())}
+          onClick={() => void runStage('dub')}
+          title={zh ? '使用已有译文生成配音，请先完成全部字幕翻译' : 'Dub using existing translations; translate all subtitles first'}
+        >
+          <span>{stage === 'dub' ? (zh ? '配音中…' : 'Dubbing…') : (zh ? '配音' : 'Dub')}</span>
+        </button>
+      </div>
       {busy && <button type="button" className="text-button subtitle-stop" onClick={stop}>{zh ? '停止' : 'Stop'}</button>}
       <Select
         value={mode}
@@ -170,9 +392,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
         className="subtitle-select"
         aria-label={zh ? '字幕显示模式' : 'Subtitle display mode'}
       />
-      <DubbingPanel file={localPath} cues={cues} offset={offset} disabled={busy || !enabled} sourceKey={videoSrc} />
       {cues.length > 0 && <>
-        <button type="button" className="primary" disabled={busy} onClick={() => void translate()}>{zh ? '翻译字幕' : 'Translate'}</button>
         <button type="button" className="text-button" onClick={download}>{zh ? '导出 SRT' : 'Export SRT'}</button>
         <label className="subtitle-offset">{zh ? '延迟' : 'Delay'}<input type="number" min={-60} max={60} step={0.1} value={offset} onChange={event => { const value = Number(event.target.value); setOffset(Number.isFinite(value) ? Math.max(-60, Math.min(60, value)) : 0); }} />s</label>
         <Select
@@ -184,9 +404,23 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
         />
       </>}
     </div>
-    {confirmAsr && <div className="asr-consent" role="group" aria-label={zh ? '确认音频上传' : 'Confirm audio upload'}><span>{window.lingvoice.runtime === 'browser' ? (zh ? '当前视频将上传到本机 Web 后端，提取的音频再发送至 ASR Provider，可能产生费用。临时视频会在任务结束后删除，识别结果将替换当前字幕。继续吗？' : 'This video will be uploaded to the local Web backend, then extracted audio will be sent to your ASR provider and may incur charges. Temporary media is deleted after the task. The result replaces current subtitles. Continue?') : (zh ? '将提取并上传当前视频的音频到 ASR Provider，可能产生费用。完成后替换当前字幕，继续吗？' : 'Audio from this video will be uploaded to your ASR provider and may incur charges. The result will replace current subtitles. Continue?')}</span><button type="button" className="primary asr-confirm" disabled={busy} onClick={() => void recognize()}>{zh ? '确认并识别' : 'Confirm and transcribe'}</button><button type="button" className="text-button" onClick={() => setConfirmAsr(false)}>{zh ? '取消' : 'Cancel'}</button></div>}
+    {result && (
+      <div className="dubbing-result-card">
+        <div className="dubbing-result-title">
+          <Icon name="mic" size={14} />
+          <span>{zh ? '配音制作完成' : 'Dubbing ready'} ({result.targetLanguage})</span>
+        </div>
+        <audio controls src={mediaUrl(result.audio)} aria-label={zh ? '配音音频试听' : 'Dubbed audio preview'} />
+        <div className="dubbing-result-actions">
+          <a className="choose-file-button" href={mediaUrl(result.video)} download>{zh ? '下载配音视频' : 'Download video'}</a>
+          <a className="choose-file-button" href={mediaUrl(result.audio)} download>{zh ? '下载配音音频' : 'Download audio'}</a>
+          <a className="choose-file-button" href={mediaUrl(result.subtitles)} download>{zh ? '下载配音字幕' : 'Download subtitles'}</a>
+        </div>
+      </div>
+    )}
     {name && <p className="subtitle-hint">{`${name} · ${cues.length} ${zh ? '条字幕' : 'cues'}`}</p>}
-    {progress && <p className="subtitle-hint" role="status">{progress}</p>}{error && <p className="settings-error" role="alert">{error}</p>}
+    {progress && <p className="subtitle-hint" role="status">{progress}</p>}
+    {error && <p className="settings-error" role="alert">{error}</p>}
     <div className="subtitle-transcript-panel" aria-label={zh ? '翻译时间戳窗口' : 'Transcript window'}>
       {cues.length > 5 && (
         <div className="transcript-search-box">
@@ -274,11 +508,13 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       )}
     </div>
   </div>;
+
   const overlay = active.length > 0 && <div className="subtitle-overlay" style={{ fontSize }}>
     {active.map(cue => <div className="subtitle-cue" key={cue.id}>
       {mode !== 'original' && cue.translated && <div className="subtitle-translation"><span>{cue.translated}</span></div>}
       {(mode !== 'translated' || !cue.translated) && <div className={mode === 'bilingual' && cue.translated ? 'subtitle-original secondary' : 'subtitle-original'}><span>{cue.text}</span></div>}
     </div>)}
   </div>;
+
   return { toolbar, overlay, cues, offset, snapshot: { cues, offset, file: localPath, sourceKey: videoSrc } };
 }

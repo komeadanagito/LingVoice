@@ -162,3 +162,44 @@ export async function extractVoiceReference(dialoguePath: string, outputPath: st
     const info = await readWavInfo(temporary); assertDuration(info.duration, duration, 1 / 24000); return info;
   });
 }
+
+/** Built-in FFmpeg DSP Mid-Side + Spectral vocal/BGM separation fallback when local Python UVR is not configured. */
+export async function separateAudioFfmpegFallback(inputPath: string, outputDirectory: string, options: AudioOptions): Promise<{ dialoguePath: string; backgroundPath: string; duration: number }> {
+  if (!path.isAbsolute(outputDirectory) || /[\x00-\x1f]/.test(outputDirectory)) throw new Error('Separation output must be an absolute local directory path.');
+  const input = await localFile(inputPath), source = await readWavInfo(input);
+  checkCancelled(options.signal);
+  await fs.mkdir(path.dirname(outputDirectory), { recursive: true });
+  const stage = await fs.mkdtemp(path.join(path.dirname(outputDirectory), '.dsp-separation-stage-'));
+  try {
+    const dialogueOut = path.join(stage, 'dialogue.wav');
+    const backgroundOut = path.join(stage, 'background.wav');
+    // Single-pass lightweight Mid-Side separation: decodes source once and writes both stems simultaneously.
+    const dualStemFilter =
+      '[0:a]asplit=2[in_v][in_b];' +
+      '[in_v]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=85,lowpass=f=3800[v_out];' +
+      '[in_b]asplit=3[side_in][low_in][high_in];' +
+      '[side_in]pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0[side];' +
+      '[low_in]lowpass=f=110,volume=0.85[low];' +
+      '[high_in]highpass=f=4200,volume=0.75[high];' +
+      '[side][low][high]amix=inputs=3:duration=longest:dropout_transition=0:normalize=0[bg_out]';
+    await runAudioProcess(
+      options.ffmpegPath,
+      [
+        ...ffmpegBase, '-i', input, '-vn', '-filter_complex', dualStemFilter,
+        '-map', '[v_out]', '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', dialogueOut,
+        '-map', '[bg_out]', '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', backgroundOut,
+      ],
+      options,
+    );
+    const dialogueInfo = await readWavInfo(dialogueOut);
+    const backgroundInfo = await readWavInfo(backgroundOut);
+    assertDuration(dialogueInfo.duration, source.duration);
+    assertDuration(backgroundInfo.duration, source.duration);
+    checkCancelled(options.signal);
+    await fs.rm(outputDirectory, { recursive: true, force: true });
+    await fs.rename(stage, outputDirectory);
+    return { dialoguePath: path.join(outputDirectory, 'dialogue.wav'), backgroundPath: path.join(outputDirectory, 'background.wav'), duration: source.duration };
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true }).catch(() => {});
+  }
+}

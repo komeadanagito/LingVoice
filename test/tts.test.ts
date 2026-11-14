@@ -27,6 +27,7 @@ function deferred<T>() {
 test('speech settings defaults, strict validation, persistence and copies contain no credentials', async () => {
   await fixture(async (service, providers, file, id) => {
     assert.deepEqual(await service.getConfig(), { settings: defaultTtsSettings, hasApiKey: false });
+    assert.equal((await service.getConfig()).settings.model, 'qwen-audio-3.1-tts-plus');
     const config = { settings: { ...defaultTtsSettings, providerId: id, model: ' custom-model ', voice: 'custom-voice', speed: 0.25, fullUrl: true } };
     const saved = await service.saveConfig(config);
     assert.equal(saved.settings.model, 'custom-model');
@@ -34,7 +35,7 @@ test('speech settings defaults, strict validation, persistence and copies contai
     assert.equal((await service.getConfig()).settings.voice, 'custom-voice');
     assert.deepEqual(await new TtsService(file, providers, vault).getConfig(), { settings: { ...config.settings, model: 'custom-model' }, hasApiKey: false });
     assert.equal((await fs.readFile(file, 'utf8')).includes('private-secret'), false);
-    for (const patch of [{ speed: 0.24 }, { speed: 4.01 }, { speed: NaN }, { speed: Infinity }, { speed: '1' }, { fullUrl: 1 }, { model: '' }, { model: 'x'.repeat(201) }, { voice: '\n' }, { providerId: 'bad id' }, { baseUrl: 'https://override' }]) {
+    for (const patch of [{ speed: 0.24 }, { speed: 4.01 }, { speed: NaN }, { speed: Infinity }, { speed: '1' }, { fullUrl: 1 }, { model: '' }, { model: 'x'.repeat(201) }, { voice: '\n' }, { providerId: 'bad id' }, { baseUrl: 'file:///a' }]) {
       await assert.rejects(service.saveConfig({ settings: { ...config.settings, ...patch } } as TtsConfigUpdate));
     }
     const withCustomKey = await service.saveConfig({ ...config, apiKey: 'custom-key' });
@@ -46,6 +47,31 @@ test('speech settings defaults, strict validation, persistence and copies contai
     await assert.rejects(service.saveConfig({ settings: { ...defaultTtsSettings, providerId: incompatible.id } }), /does not support/);
     await assert.rejects(service.saveConfig({ settings: { ...defaultTtsSettings, providerId: 'missing' } }), /does not exist/);
     await service.saveConfig({ settings: { ...defaultTtsSettings, speed: 4 } });
+  });
+});
+
+test('Token Plan compatible root uses same-host native speech API and exact selected model and key', async t => {
+  await fixture(async service => {
+    const baseUrl = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const apiKey = 'sk-sp-private-test-only';
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      calls++;
+      assert.equal(url, 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer');
+      assert.equal((init.headers as Record<string, string>).Authorization, `Bearer ${apiKey}`);
+      assert.deepEqual(JSON.parse(init.body as string), { model: 'qwen-audio-3.0-tts-plus', input: { text: 'Test', voice: 'longanhuan_v3.6', format: 'mp3', sample_rate: 24000 } });
+      return audio();
+    });
+    for (const fullUrl of [false, true]) {
+      await service.saveConfig({ settings: { ...defaultTtsSettings, baseUrl, providerId: '', model: 'qwen-audio-3.0-tts-plus', fullUrl }, apiKey });
+      assert.equal((await service.generate({ text: 'Test' })).mimeType, 'audio/mpeg');
+    }
+    assert.equal(calls, 2);
+    assert.equal((await service.dubbingContextInfo()).baseUrl, 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1');
+    assert.equal((await service.dubbingContextInfo()).model, 'qwen-audio-3.0-tts-plus');
+    await service.withDubbingContext(async context => {
+      assert.deepEqual(context, { baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1', apiKey });
+    });
   });
 });
 
@@ -63,6 +89,30 @@ test('speech atomic writes serialize and failed persistence preserves committed 
   });
 });
 
+test('speech uses a dedicated Base URL and API key, and prefers them over the bound provider', async t => {
+  await fixture(async (service, _providers, _file, id) => {
+    await service.saveConfig({
+      settings: { ...defaultTtsSettings, providerId: '', baseUrl: 'https://tts.example/v1', model: 'tts-1' },
+      apiKey: 'dedicated-secret',
+    });
+    const fetchMock = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      assert.equal(url, 'https://tts.example/v1/audio/speech');
+      assert.equal((init.headers as Record<string, string>).Authorization, 'Bearer dedicated-secret');
+      return audio();
+    });
+    await service.generate({ text: 'Hello' });
+    assert.equal(fetchMock.mock.callCount(), 1);
+    await service.saveConfig({
+      settings: { ...defaultTtsSettings, providerId: id, baseUrl: 'https://override.example/v1', model: 'tts-1' },
+    });
+    t.mock.method(globalThis, 'fetch', async (url: string) => {
+      assert.equal(url, 'https://override.example/v1/audio/speech');
+      return audio();
+    });
+    await service.generate({ text: 'Override' });
+  });
+});
+
 test('corrupt speech files and filesystem errors have sanitized errors', async () => {
   await fixture(async (_service, providers, file) => {
     for (const value of ['private-secret', '{"settings":{"private-secret":true}}']) {
@@ -76,7 +126,7 @@ test('corrupt speech files and filesystem errors have sanitized errors', async (
 
 test('speech uses saved URL, key and settings, sends mp3 body, and returns binary audio', async t => {
   await fixture(async (service, _providers, _file, id) => {
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, speed: 1.5 } });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1', speed: 1.5 } });
     const fetchMock = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
       assert.equal(url, 'https://example.com/proxy/v1/audio/speech');
       assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error');
@@ -86,7 +136,7 @@ test('speech uses saved URL, key and settings, sends mp3 body, and returns binar
     });
     assert.deepEqual(await service.generate({ text: 'Hello\n世界' }), { mimeType: 'audio/mpeg', fileName: 'speech.mp3', audioBase64: Buffer.from([73, 68, 51, 1]).toString('base64') });
     assert.equal(fetchMock.mock.callCount(), 1); assert.equal(service.busy, false);
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, speed: 1.5 }, apiKey: 'override-secret' });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1', speed: 1.5 }, apiKey: 'override-secret' });
     let overrideUsed = false;
     t.mock.method(globalThis, 'fetch', async (_url: string, init: RequestInit) => {
       assert.equal((init.headers as Record<string, string>).Authorization, 'Bearer override-secret');
@@ -130,7 +180,7 @@ test('speech rejects empty, long or malformed text and all request overrides bef
 
 test('speech accepts exact text and audio limits, and validates actual and declared byte bounds', async t => {
   await fixture(async (service, _providers, _file, id) => {
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id } });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1' } });
     const limit = 10 * 1024 * 1024;
     const fetchMock = t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(limit), { headers: { 'content-type': 'audio/mpeg' } }));
     assert.equal(Buffer.from((await service.generate({ text: 'x'.repeat(4096) })).audioBase64, 'base64').length, limit);
@@ -154,7 +204,7 @@ test('speech accepts exact text and audio limits, and validates actual and decla
 
 test('speech busy and cancellation release promptly even if fetch ignores AbortSignal', async t => {
   await fixture(async (service, _providers, _file, id) => {
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id } });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1' } });
     const entered = deferred<void>();
     const blocked = deferred<Response>();
     const fetchMock = t.mock.method(globalThis, 'fetch', () => { entered.resolve(); return blocked.promise; });
@@ -174,7 +224,7 @@ test('speech busy and cancellation release promptly even if fetch ignores AbortS
 
 test('speech cancellation while reading cancels the stream and permits another request', async t => {
   await fixture(async (service, _providers, _file, id) => {
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id } });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1' } });
     const reading = deferred<void>(); let cancelled = false;
     t.mock.method(globalThis, 'fetch', async () => new Response(new ReadableStream({ pull() { reading.resolve(); }, cancel() { cancelled = true; } }), { headers: { 'content-type': 'audio/mpeg' } }));
     const pending = service.generate({ text: 'Hello' });
@@ -187,7 +237,7 @@ test('speech cancellation while reading cancels the stream and permits another r
 
 test('speech timeout aborts at 120 seconds and resets busy deterministically', async t => {
   await fixture(async (service, _providers, _file, id) => {
-    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id } });
+    await service.saveConfig({ settings: { ...defaultTtsSettings, providerId: id, model: 'tts-1' } });
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const entered = deferred<void>();
     let signal: AbortSignal | undefined;

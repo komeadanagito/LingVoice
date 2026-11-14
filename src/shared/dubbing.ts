@@ -1,7 +1,7 @@
-export const SUPPORTED_DUBBING_MODELS = ['qwen-audio-3.1-tts-plus', 'qwen-audio-3.0-tts-plus'] as const;
+export const SUPPORTED_DUBBING_MODELS = ['qwen-audio-3.1-tts-plus', 'qwen-audio-3.0-tts-plus', 'doubao-seed-tts-2.0'] as const;
 export type DubbingModel = (typeof SUPPORTED_DUBBING_MODELS)[number];
 export const DEFAULT_DUBBING_MODEL: DubbingModel = 'qwen-audio-3.1-tts-plus';
-/** Default model for dubbing; users can also choose qwen-audio-3.0-tts-plus. */
+/** Default model for dubbing; users can also choose qwen-audio-3.0-tts-plus or doubao-seed-tts-2.0. */
 export const DUBBING_MODEL = DEFAULT_DUBBING_MODEL;
 export interface DubbingSettings {
   pythonPath: string;
@@ -34,6 +34,8 @@ export interface DubbingRequest {
   preview: boolean;
   /** Explicit consent for reference audio upload and billable synthesis. */
   consent: boolean;
+  /** Main workspace uses the endpoint/model currently selected in TTS settings. */
+  useTtsConfig?: boolean;
 }
 export type DubbingStage = 'preparing' | 'separating' | 'translating' | 'voice' | 'synthesizing' | 'aligning' | 'mixing' | 'complete';
 export interface DubbingProgress { jobId: string; stage: DubbingStage; completed: number; total: number; message: string }

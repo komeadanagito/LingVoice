@@ -180,6 +180,7 @@ export function ServicesSettings() {
     const payload = {
       settings: {
         ...asr,
+        fullUrl: false,
         prompt: '',
         baseUrl: asr.baseUrl.trim() || defaultAsrSettings.baseUrl,
         model: asr.model.trim() || defaultAsrSettings.model,
@@ -324,11 +325,6 @@ export function ServicesSettings() {
         </button>
       </div>
       <div id="asr-section-body" className="settings-section-body">
-        <p className="settings-hint asr-hint" style={{ margin: '0 0 12px', fontSize: '13px', color: 'var(--color-text-muted, #666)', lineHeight: 1.5 }}>
-          {zh
-            ? '支持自定义填写接口地址 (Base URL)、API Key 与识别模型（如本地 Whisper、SiliconFlow、Groq 等），也可以选择已有的 Provider。'
-            : 'You can directly enter a custom Base URL, API Key, and model (e.g. local Whisper, SiliconFlow, Groq), or select an existing Provider.'}
-        </p>
         <fieldset disabled={!loaded || busy} className="translation-fields"><div className="settings-form-grid">
           <Field title="Provider"><Select id="asr-provider" value={asr.providerId || ''} options={getProviderOptions('asr', asr.providerId)} onChange={chooseAsrProvider} /></Field>
           <Field title={zh ? '接口地址 (Base URL)' : 'Base URL'}>
@@ -336,11 +332,11 @@ export function ServicesSettings() {
               id="asr-base-url"
               type="url"
               value={asr.baseUrl}
-              placeholder="https://api.openai.com/v1"
+              placeholder="https://<workspace-domain>/compatible-mode/v1"
               onChange={event => setAsr(previous => ({ ...previous, baseUrl: event.target.value }))}
             />
           </Field>
-          <Field title={zh ? '识别模型' : 'Transcription model'}><ModelPicker id="asr-model" providerId={asr.providerId || ''} value={asr.model} onChange={model => setAsr(previous => ({ ...previous, model }))} entry={asr.providerId ? models.entries[asr.providerId] : undefined} onFetch={() => asr.providerId && void models.fetchModels(asr.providerId)} supportsModels={!!asrAdapter?.capabilities.includes('models')} disabled={busy} placeholder="whisper-1" zh={zh} /></Field>
+          <Field title={zh ? '识别模型' : 'Transcription model'}><ModelPicker id="asr-model" providerId={asr.providerId || ''} value={asr.model} onChange={model => setAsr(previous => ({ ...previous, model }))} entry={asr.providerId ? models.entries[asr.providerId] : undefined} onFetch={() => asr.providerId && void models.fetchModels(asr.providerId)} supportsModels={!!asrAdapter?.capabilities.includes('models')} disabled={busy} placeholder="qwen3-asr-flash" zh={zh} /></Field>
           <Field title={zh ? '音频语言' : 'Audio language'}><Select id="asr-language" value={asr.language} options={languageOptions(zh, '', asr.language)} onChange={language => setAsr(previous => ({ ...previous, language }))} /></Field>
           <Field title={asr.providerId ? (zh ? '独立 API Key（可选）' : 'Custom API Key (optional)') : (zh ? 'API Key（密钥）' : 'API Key')}>
             <div className="secret-input">
@@ -348,7 +344,7 @@ export function ServicesSettings() {
                 type={showAsrKey ? 'text' : 'password'}
                 value={asrKey}
                 autoComplete="off"
-                placeholder={hasAsrKey ? (zh ? '已配置密钥；留空保留' : 'Key saved; leave blank to keep') : (asr.providerId ? (zh ? '留空使用 Provider 默认密钥' : 'Leave blank to use Provider key') : (zh ? '输入 API Key（本地部署无密码可留空）' : 'Enter API Key (or leave blank if none)'))}
+                placeholder={hasAsrKey ? (zh ? '已配置密钥；留空保留' : 'Key saved; leave blank to keep') : (asr.providerId ? (zh ? '留空使用 Provider 默认密钥' : 'Leave blank to use Provider key') : (zh ? '输入阿里云百炼 API Key' : 'Enter your Alibaba Cloud Bailian API Key'))}
                 onChange={event => setAsrKey(event.target.value)}
                 aria-label={zh ? 'API Key' : 'API Key'}
               />
@@ -357,7 +353,6 @@ export function ServicesSettings() {
               </button>
             </div>
           </Field>
-          <label className="checkbox-field"><input type="checkbox" checked={asr.fullUrl} onChange={event => setAsr(previous => ({ ...previous, fullUrl: event.target.checked }))} />{zh ? '接口地址是完整请求地址 (/audio/transcriptions)' : 'Endpoint is full URL'}</label>
         </div><div className="settings-actions">
           <button className="primary asr-save" type="button" onClick={() => void runAsr(false)}>{zh ? '保存语音识别设置' : 'Save speech recognition'}</button>
           <button className="choose-file-button asr-test" type="button" onClick={() => void runAsr(true)}>{testingAsr ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试语音识别' : 'Test speech recognition')}</button>
@@ -368,8 +363,6 @@ export function ServicesSettings() {
     </section>
 
     <TtsSettingsCard
-      catalog={catalog}
-      models={models}
       disabled={!loaded || busy}
       collapsed={collapsedSections.has('tts')}
       onToggleCollapse={() => toggleSection('tts')}

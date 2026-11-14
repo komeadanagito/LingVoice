@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { DubbingService, validateDubbingRequest, validateDubbingSettings, selectVoiceReference, dubbingSrt, type DubbingDependencies } from '../src/main/dubbing';
+import { DubbingService, validateDubbingRequest, validateDubbingSettings, selectVoiceReference, selectCleanestVoiceReference, groupDubbingUtterances, dubbingSrt, type DubbingDependencies } from '../src/main/dubbing';
 import { DEFAULT_DUBBING_MODEL, DUBBING_MODEL, SUPPORTED_DUBBING_MODELS, type DubbingModel, type DubbingRequest, type DubbingProgress } from '../src/shared/dubbing';
 import { defaultTranslationSettings } from '../src/shared/translation';
 import { readWavInfo } from '../src/main/audio-process';
-import { planAlignment } from '../src/main/audio-alignment';
+import { planAlignment, detectWavTrimBounds } from '../src/main/audio-alignment';
 
 function wav(seconds = 6, rate = 48000, channels = 2): Buffer {
   const samples = Math.round(seconds * rate), bytes = samples * channels * 2;
@@ -20,7 +20,7 @@ function wav(seconds = 6, rate = 48000, channels = 2): Buffer {
 function request(file = 'C:\\media\\source.mp4'): DubbingRequest {
   return { jobId: 'dubbing-test-job', file, cues: [{ id: 1, start: 0, end: 6, text: 'Original speech' }], offset: 0, backgroundVolume: 1, preview: false, consent: true };
 }
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, selectedTts?: { baseUrl: string; model: string; hasApiKey: boolean }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-dubbing-test-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const source = path.join(directory, 'source.mp4'), model = path.join(directory, 'model.ckpt');
@@ -29,6 +29,7 @@ async function fixture(t: TestContext) {
   let created = 0, deleted = 0, separationCount = 0, account = 'account-key', enrollmentFailure = false;
   const voiceId = `${DUBBING_MODEL}-lingvoice-test`;
   const translationSettings = { ...defaultTranslationSettings, targetLanguage: 'en', providerId: 'mock' };
+  const clientModels: string[] = [];
   const dependencies: Partial<DubbingDependencies> = {
     detect: async () => ({ ready: true, diagnostics: ['Offline test environment.'] }),
     extract: async (_input, output) => { await fs.writeFile(output, wav()); return readWavInfo(output); },
@@ -46,7 +47,8 @@ async function fixture(t: TestContext) {
     },
     mix: async value => { await fs.writeFile(value.outputPath, 'offline-mixed-video'); return { outputPath: value.outputPath, duration: value.duration }; },
     client: credentials => {
-      assert.equal(credentials.baseUrl, 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1');
+      assert.equal(credentials.baseUrl, selectedTts ? `${new URL(selectedTts.baseUrl).origin}/api/v1` : 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1');
+      clientModels.push((credentials as { model?: string }).model ?? DUBBING_MODEL);
       assert.equal(credentials.apiKey, account);
       return {
         createVoice: async (_reference, _signal, onCreated) => {
@@ -68,8 +70,12 @@ async function fixture(t: TestContext) {
   };
   const service = new DubbingService({
     directory: path.join(directory, 'dubbing'), ffmpegPath: 'offline-ffmpeg', helperPath: 'offline-helper',
-    tts: { withDubbingContext: action => action({ baseUrl: 'unused-provider-url', apiKey: account }) },
+    tts: {
+      withDubbingContext: action => action({ baseUrl: selectedTts?.baseUrl ?? 'unused-provider-url', apiKey: account }),
+      ...(selectedTts ? { dubbingContextInfo: async () => ({ ...selectedTts, providerName: 'Selected Token Plan' }) } : {}),
+    },
     translation: {
+      summarize: async request => request.memory,
       getConfig: async () => ({ settings: { ...translationSettings }, hasApiKey: true, hasMachineKey: false }),
       translate: async (payload, signal, durations) => {
         signal?.throwIfAborted(); translations.push(payload.texts); assert.deepEqual(durations, [6]); return payload.texts.map(text => `Translated ${text}`);
@@ -78,7 +84,7 @@ async function fixture(t: TestContext) {
     emit: event => events.push(event),
   }, dependencies);
   await service.saveConfig({ pythonPath: 'offline-python', modelFile: model, baseUrl: 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1' });
-  return { service, source, directory, events, spoken, translations, translationSettings, voiceId,
+  return { service, source, directory, events, spoken, translations, translationSettings, voiceId, clientModels,
     counts: () => ({ created, deleted, separationCount }), setAccount: (value: string) => { account = value; }, failEnrollment: () => { enrollmentFailure = true; } };
 }
 
@@ -97,10 +103,32 @@ test('dubbing settings accept only explicit official endpoints and local absolut
   const settings = { pythonPath: 'python', modelFile: path.resolve('model.ckpt'), baseUrl: 'https://dashscope.aliyuncs.com/api/v1', model: 'qwen-audio-3.1-tts-plus' as const };
   assert.deepEqual(validateDubbingSettings(settings), settings);
   assert.equal(validateDubbingSettings({ ...settings, model: 'qwen-audio-3.0-tts-plus' }).model, 'qwen-audio-3.0-tts-plus');
+  assert.equal(validateDubbingSettings({ ...settings, model: 'doubao-seed-tts-2.0' }).model, 'doubao-seed-tts-2.0');
   assert.throws(() => validateDubbingSettings({ ...settings, model: 'unsupported-model' as any }), /Unsupported/);
   assert.throws(() => validateDubbingSettings({ ...settings, modelFile: 'relative.ckpt' }), /absolute/);
-  for (const baseUrl of ['http://dashscope.aliyuncs.com/api/v1', 'https://evil.example/api/v1', 'https://dashscope.aliyuncs.com/compatible-mode/v1']) assert.throws(() => validateDubbingSettings({ ...settings, baseUrl }));
+  assert.equal(validateDubbingSettings({ ...settings, baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' }).baseUrl, 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1');
+  for (const baseUrl of ['http://dashscope.aliyuncs.com/api/v1', 'https://evil.example/api/v1']) assert.throws(() => validateDubbingSettings({ ...settings, baseUrl }));
   assert.throws(() => validateDubbingSettings({ ...settings, apiKey: 'never-accept-secret-here' }));
+});
+
+test('main workspace uses selected Token Plan TTS endpoint and exact model over legacy dubbing settings', async t => {
+  const f = await fixture(t, { baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', model: 'qwen-audio-3.0-tts-plus', hasApiKey: true });
+  const result = await f.service.run({ ...request(f.source), useTtsConfig: true });
+  assert.match(result.voiceId, /^qwen-audio-3\.0-tts-plus-/);
+  assert.deepEqual(f.clientModels, ['qwen-audio-3.0-tts-plus']);
+  const voices = (await f.service.getConfig()).voices!;
+  assert.equal(voices[0].baseUrl, 'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1');
+});
+
+test('main workspace fails before preprocessing for missing TTS credentials or unsupported models', async t => {
+  const selected = { baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', model: 'qwen-audio-3.0-tts-plus', hasApiKey: false };
+  const f = await fixture(t, selected);
+  await assert.rejects(f.service.run({ ...request(f.source), useTtsConfig: true }), /API Key/);
+  selected.hasApiKey = true; selected.model = 'unsupported';
+  await assert.rejects(f.service.run({ ...request(f.source), useTtsConfig: true }), /supported dubbing model/);
+  assert.equal(f.counts().separationCount, 0);
+  assert.deepEqual(f.clientModels, []);
+  assert.throws(() => validateDubbingRequest({ ...request(f.source), useTtsConfig: 'true' }));
 });
 
 test('voice reference selection rejects insufficient speech and respects offsets and duration', () => {
@@ -175,3 +203,65 @@ test('incompatible subtitles and target languages fail before cloud synthesis', 
   await assert.rejects(f.service.run(request(f.source)), /Chinese and English/);
   assert.equal(f.counts().created, 0);
 });
+
+test('prepareVocals separates stems ahead of ASR and reuses cached stems during dubbing run', async t => {
+  const f = await fixture(t);
+  const vocalPath = await f.service.prepareVocals(f.source);
+  assert.ok(vocalPath && vocalPath.endsWith('dialogue.wav'));
+  assert.equal(f.counts().separationCount, 1);
+  await f.service.run(request(f.source));
+  assert.equal(f.counts().separationCount, 1, 'dubbing run must reuse stems separated by prepareVocals');
+});
+
+test('selectCleanestVoiceReference prefers high-SNR unclipped vocal segments', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-snr-test-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const wavFile = path.join(dir, 'dialogue.wav');
+  const buf = wav(20, 16000, 1);
+  // First window (0..6s): very quiet/empty; second window (8..15s): clear unclipped vocal energy
+  for (let i = 8 * 16000; i < 15 * 16000; i++) {
+    buf.writeInt16LE(6000, 44 + i * 2);
+  }
+  await fs.writeFile(wavFile, buf);
+  const cues = [
+    { id: 1, start: 0, end: 6, text: 'Quiet intro' },
+    { id: 2, start: 8, end: 15, text: 'Clear speech window' },
+  ];
+  const selected = await selectCleanestVoiceReference(cues, 0, 20, wavFile);
+  assert.equal(selected.start, 8);
+  assert.equal(selected.duration, 7);
+});
+
+test('groupDubbingUtterances merges fragmented unpunctuated clauses into Bilibili-style breath groups while respecting terminal punctuation', () => {
+  const cues = [
+    { id: 1, start: 0.0, end: 2.0, text: '今天我们来拆解', translated: 'Today we are unpacking,', speechText: 'Today we are unpacking,' },
+    { id: 2, start: 2.1, end: 4.5, text: 'B站最新的英文配音技术。', translated: 'Bilibili\'s latest English dubbing tech.', speechText: 'Bilibili\'s latest English dubbing tech.' },
+    { id: 3, start: 5.2, end: 7.0, text: '效果非常自然！', translated: 'It sounds super natural!', speechText: 'It sounds super natural!' },
+  ];
+  const groups = groupDubbingUtterances(cues, 'en');
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].start, 0.0);
+  assert.equal(groups[0].end, 4.5);
+  assert.equal(groups[0].speechText, 'Today we are unpacking Bilibili\'s latest English dubbing tech.');
+  assert.equal(groups[1].speechText, 'It sounds super natural!');
+});
+
+test('detectWavTrimBounds strips leading and trailing TTS dead silence while preserving voiced speech', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-trim-test-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const wavFile = path.join(dir, 'tts.wav');
+  // 3.4s WAV at 24 kHz mono: 0..0.3s silence, 0.3..3.0s speech (2.7s), 3.0..3.4s silence
+  const buf = wav(3.4, 24000, 1);
+  for (let i = Math.floor(0.3 * 24000); i < Math.floor(3.0 * 24000); i++) {
+    buf.writeInt16LE(5000, 44 + i * 2);
+  }
+  await fs.writeFile(wavFile, buf);
+  const info = await readWavInfo(wavFile);
+  const trim = await detectWavTrimBounds(wavFile, info);
+  assert.ok(trim, 'should detect leading/trailing TTS silence padding');
+  assert.ok(trim.trimmedDuration >= 2.7 && trim.trimmedDuration <= 2.8, `expected ~2.75s trimmed duration, got ${trim.trimmedDuration}`);
+  // Trimmed duration (2.75s) now fits cleanly into a 3.0s slot at 1.0x tempo!
+  const plan = planAlignment(trim.trimmedDuration, 0, 3.0);
+  assert.equal(plan.tempo, 1);
+});
+

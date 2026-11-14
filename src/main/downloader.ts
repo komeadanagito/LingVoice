@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import type { VideoInfo, DownloadProgress, DownloadEvent, DownloadResult } from '../shared/contracts';
 import { LocalizedError } from '../shared/i18n/translate';
+import { downloadBilibili, inspectBilibili } from './bilibili';
 
 interface YtDlpFormat { vcodec?: unknown; height?: unknown }
 interface YtDlpInfo {
@@ -144,6 +145,21 @@ interface DownloadOptions {
   cookieFile?: string;
 }
 
+function getBinaryName(): string {
+  if (process.platform === 'win32') return 'yt-dlp.exe';
+  if (process.platform === 'darwin') return 'yt-dlp_macos';
+  if (process.platform === 'linux') {
+    if (process.arch === 'arm64') return 'yt-dlp_linux_aarch64';
+    return 'yt-dlp_linux';
+  }
+  return 'yt-dlp';
+}
+
+function isBilibiliTarget(url: string): boolean {
+  const host = new URL(url).hostname.toLowerCase();
+  return host === 'www.bilibili.com' || host === 'b23.tv';
+}
+
 export class Downloader {
   readonly dataDir: string;
   readonly ffmpegPath: string;
@@ -151,6 +167,7 @@ export class Downloader {
   child: ChildProcess | null = null;
   busy = false;
   cancelled = false;
+  private abort: AbortController | null = null;
   private preparePromise: Promise<string> | null = null;
 
   constructor({ dataDir, ffmpegPath = '', emit }: DownloaderOptions) {
@@ -160,21 +177,41 @@ export class Downloader {
   }
 
   async ensureBinary(): Promise<string> {
-    const binary = path.join(this.dataDir, 'tools', 'yt-dlp.exe');
-    try { await fs.access(binary); return binary; } catch { /* First launch. */ }
-    if (process.platform !== 'win32') throw new LocalizedError('errors.platform');
+    const binaryName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+    const binary = path.join(this.dataDir, 'tools', binaryName);
+    try {
+      await fs.access(binary);
+      if (process.platform !== 'win32') {
+        try { await fs.chmod(binary, 0o755); } catch {}
+      }
+      return binary;
+    } catch { /* First launch or missing local copy. */ }
+
+    // Check system-installed yt-dlp on non-Windows platforms
+    if (process.platform !== 'win32') {
+      const systemCandidates = ['/usr/local/bin/yt-dlp', '/usr/bin/yt-dlp', '/opt/homebrew/bin/yt-dlp'];
+      for (const candidate of systemCandidates) {
+        try {
+          await fs.access(candidate);
+          return candidate;
+        } catch {}
+      }
+    }
+
     if (!this.preparePromise) {
       this.preparePromise = (async () => {
         this.emit({ type: 'status', message: '首次使用：正在下载并校验下载组件，请稍候…', messageKey: 'status.preparingTools' });
         await fs.mkdir(path.dirname(binary), { recursive: true });
+        const artifactName = getBinaryName();
         const base = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/';
         const [response, checksums] = await Promise.all([
-          fetch(`${base}yt-dlp.exe`, { signal: AbortSignal.timeout(180000) }),
+          fetch(`${base}${artifactName}`, { signal: AbortSignal.timeout(180000) }),
           fetch(`${base}SHA2-256SUMS`, { signal: AbortSignal.timeout(60000) }),
         ]);
         if (!response.ok || !checksums.ok) throw new LocalizedError('errors.toolsFetch');
         const sums = await checksums.text();
-        const expected = sums.match(/^([a-fA-F0-9]{64})\s+\*?yt-dlp\.exe\s*$/m)?.[1];
+        const escapedName = artifactName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const expected = sums.match(new RegExp(`^([a-fA-F0-9]{64})\\s+\\*?${escapedName}\\s*$`, 'm'))?.[1];
         if (!expected) throw new LocalizedError('errors.toolsChecksumInfo');
         if (!response.body) throw new LocalizedError('errors.toolsEmpty');
         const chunks: Uint8Array[] = [];
@@ -196,7 +233,13 @@ export class Downloader {
         const actual = crypto.createHash('sha256').update(bytes).digest('hex');
         if (actual !== expected.toLowerCase()) throw new LocalizedError('errors.toolsChecksum');
         await fs.writeFile(`${binary}.tmp`, bytes);
+        if (process.platform !== 'win32') {
+          await fs.chmod(`${binary}.tmp`, 0o755);
+        }
         await fs.rename(`${binary}.tmp`, binary);
+        if (process.platform !== 'win32') {
+          await fs.chmod(binary, 0o755);
+        }
         return binary;
       })().finally(() => { this.preparePromise = null; });
     }
@@ -207,7 +250,7 @@ export class Downloader {
     const binary = await this.ensureBinary();
     if (this.cancelled) throw new LocalizedError('errors.cancelled');
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(binary, args, { windowsHide: true, shell: false });
+      const child = spawn(binary, args, { windowsHide: true, shell: false, detached: process.platform !== 'win32' });
       this.child = child;
       const output: string[] = [];
       const errors: string[] = [];
@@ -245,7 +288,11 @@ export class Downloader {
     if (this.busy) throw new LocalizedError('errors.busy');
     this.busy = true;
     this.cancelled = false;
-    try { return await action(); } finally { this.busy = false; }
+    this.abort = new AbortController();
+    try { return await action(); } finally {
+      this.busy = false;
+      this.abort = null;
+    }
   }
 
   commonArgs(url: string, cookieFile?: string): string[] {
@@ -255,6 +302,8 @@ export class Downloader {
 
   async inspect(url: string, cookieFile?: string): Promise<VideoInfo> {
     return this.exclusive(async () => {
+      const normalized = normalizeUrl(url);
+      if (isBilibiliTarget(normalized)) return inspectBilibili(normalized, cookieFile, this.abort?.signal);
       const raw = await this.run(['--dump-single-json', '--skip-download', ...this.commonArgs(url, cookieFile)]);
       const info: unknown = JSON.parse(raw);
       if (isRecord(info) && info._type === 'playlist') throw new LocalizedError('errors.playlist');
@@ -267,6 +316,18 @@ export class Downloader {
       if (!this.ffmpegPath) throw new LocalizedError('errors.ffmpegConfig');
       await fs.access(this.ffmpegPath);
       await fs.mkdir(folder, { recursive: true });
+      const normalized = normalizeUrl(url);
+      if (isBilibiliTarget(normalized)) {
+        const result = await downloadBilibili({
+          url: normalized, folder, height, ffmpegPath: this.ffmpegPath, cookieFile,
+          signal: this.abort?.signal, emit: this.emit, bindProcess: child => { this.child = child; },
+        });
+        const resolved = path.resolve(result.file);
+        const relative = path.relative(path.resolve(folder), resolved);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) throw new LocalizedError('errors.outputPath');
+        await fs.access(resolved);
+        return { file: resolved };
+      }
       let file = '';
       const args = ['--newline', '--no-colors', '--progress', '--progress-delta', '0.4',
         '--progress-template', 'download:LINGVOICE_PROGRESS:%(progress)j',
@@ -294,12 +355,20 @@ export class Downloader {
 
   cancel(): void {
     this.cancelled = true;
+    this.abort?.abort();
     if (this.child) {
       if (process.platform === 'win32' && this.child.pid) {
         // Terminate the entire process tree, including any active FFmpeg merge.
         const killer = spawn('taskkill', ['/PID', String(this.child.pid), '/T', '/F'], { windowsHide: true, shell: false });
         killer.once('error', () => this.child?.kill());
-      } else this.child.kill();
+      } else {
+        try {
+          if (this.child.pid) process.kill(-this.child.pid, 'SIGKILL');
+          else this.child.kill('SIGKILL');
+        } catch {
+          this.child.kill('SIGKILL');
+        }
+      }
     }
   }
 }

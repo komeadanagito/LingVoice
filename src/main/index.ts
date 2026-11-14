@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, protocol, safeStorage } from 'electron';
 import { TranslationService } from './translation';
+import { HistoryService } from './history';
 import { TtsService } from './tts';
 import { DubbingService } from './dubbing';
 import { AsrService } from './asr';
@@ -81,6 +82,12 @@ async function createWindow(): Promise<void> {
     await preferences.update({ folder: defaultFolder });
   }
   settings = preferences;
+  const history = new HistoryService(path.join(app.getPath('userData'), 'history.sqlite'));
+  app.once('will-quit', () => history.close());
+  handle('history:list', () => history.list());
+  handle('history:save', task => history.save(task));
+  handle('history:delete', id => history.delete(id));
+  handle('history:select', id => history.select(id));
   if (!ffmpegStatic) throw new LocalizedError('errors.ffmpegMissing');
   const ffmpegPath = app.isPackaged ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : ffmpegStatic;
   const manager = new Downloader({
@@ -165,6 +172,8 @@ async function createWindow(): Promise<void> {
   handle('translation:save', update => translation.saveConfig(update));
   handle('translation:models', () => translation.models());
   handle('translation:run', request => translation.translate(request));
+  handle('translation:memory', request => translation.summarize(request));
+  handle('translation:review', request => translation.review(request));
   handle('app:state', () => ({ ...preferences.current, version: app.getVersion() }));
   handle('app:locale', async requested => {
     if (!isLocale(requested)) throw new LocalizedError('errors.locale');

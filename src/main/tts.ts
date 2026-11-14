@@ -1,11 +1,13 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ProviderService } from './providers';
-import { defaultTtsSettings, type TtsSettings, type TtsConfig, type TtsConfigUpdate, type TtsRequest, type TtsAudio } from '../shared/tts';
+import { createDefaultProviderRegistry, type ProviderService } from './providers';
+import { DEFAULT_TTS_BASE_URL, defaultTtsSettings, type TtsSettings, type TtsConfig, type TtsConfigUpdate, type TtsRequest, type TtsAudio } from '../shared/tts';
 
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_MS = 120_000;
+const fallbackTts = createDefaultProviderRegistry().get('openai-compatible').tts!;
+const SETTINGS_KEYS = ['providerId', 'model', 'voice', 'speed', 'fullUrl', 'baseUrl'] as const;
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -15,14 +17,45 @@ function exact(value: Record<string, unknown>, keys: string[]): boolean {
 function metadata(value: unknown, empty = false): value is string {
   return typeof value === 'string' && value.length <= 200 && (empty || !!value.trim()) && !/[\u0000-\u001f\u007f]/.test(value);
 }
+function apiUrl(value: unknown, empty = false): string {
+  if (typeof value !== 'string' || value.length > 2048) throw new Error('Invalid speech API URL.');
+  const input = value.trim();
+  if (!input) {
+    if (empty) return '';
+    throw new Error('Invalid speech API URL.');
+  }
+  try {
+    const url = new URL(input);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || input.includes('#')) throw new Error();
+    return input;
+  } catch { throw new Error('Invalid speech API URL: use HTTP or HTTPS without credentials or fragments.'); }
+}
+export function alibabaApiRoot(value: string): string {
+  if (!value.trim()) return '';
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'https:' || url.username || url.password) return '';
+    if (url.hostname === 'dashscope.aliyuncs.com') return 'https://dashscope.aliyuncs.com/api/v1';
+    if (url.hostname === 'dashscope-intl.aliyuncs.com') return 'https://dashscope-intl.aliyuncs.com/api/v1';
+    if (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$/.test(url.hostname)) {
+      return `https://${url.hostname}/api/v1`;
+    }
+    return '';
+  } catch { return ''; }
+}
 function settings(value: unknown): TtsSettings {
-  if (!record(value) || !exact(value, ['providerId', 'model', 'voice', 'speed', 'fullUrl']) ||
+  if (!record(value) || typeof value.fullUrl !== 'boolean' ||
+    !['providerId', 'model', 'voice', 'speed', 'fullUrl'].every(key => Object.hasOwn(value, key)) ||
+    Object.keys(value).some(key => !SETTINGS_KEYS.includes(key as typeof SETTINGS_KEYS[number])) ||
     !metadata(value.providerId, true) || (value.providerId !== '' && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value.providerId)) ||
     !metadata(value.model) || !metadata(value.voice) || typeof value.speed !== 'number' ||
-    !Number.isFinite(value.speed) || value.speed < 0.25 || value.speed > 4 || typeof value.fullUrl !== 'boolean') {
+    !Number.isFinite(value.speed) || value.speed < 0.25 || value.speed > 4) {
     throw new Error('Invalid speech settings. Speed must be between 0.25 and 4.');
   }
-  return { providerId: value.providerId, model: value.model.trim(), voice: value.voice.trim(), speed: value.speed, fullUrl: value.fullUrl };
+  return {
+    providerId: value.providerId, baseUrl: apiUrl(value.baseUrl ?? '', true),
+    model: value.model.trim(), voice: value.voice.trim(), speed: value.speed, fullUrl: value.fullUrl,
+  };
 }
 
 interface Vault { encrypt(value: string): string; decrypt(value: string): string }
@@ -42,6 +75,24 @@ export class TtsService {
   get busy(): boolean { return this.active !== undefined || this.dubbingActive; }
   cancel(): void { this.active?.abort(); }
 
+  private async resolveAccess(state: SavedConfig): Promise<{ baseUrl: string; apiKey: string; providerName: string; tts: NonNullable<typeof fallbackTts> }> {
+    const resolved = state.settings.providerId ? await this.providers.resolve(state.settings.providerId, 'tts') : undefined;
+    let apiKey = '';
+    if (state.apiKey) {
+      try { apiKey = this.vault ? this.vault.decrypt(state.apiKey) : state.apiKey; }
+      catch { throw new Error('Unable to decrypt speech credentials. Save the key again.'); }
+    } else {
+      apiKey = resolved?.context.apiKey ?? '';
+    }
+    const baseUrl = state.settings.baseUrl || resolved?.context.baseUrl || DEFAULT_TTS_BASE_URL;
+    return {
+      baseUrl,
+      apiKey,
+      providerName: resolved?.provider.name ?? '',
+      tts: resolved?.adapter.tts ?? fallbackTts,
+    };
+  }
+
   /** Backend-only credential access. Ordinary read-aloud cannot interrupt a dubbing reservation. */
   async withDubbingContext<T>(action: (context: { baseUrl: string; apiKey: string }) => Promise<T>): Promise<T> {
     if (this.busy) throw new Error('Speech synthesis is busy. Stop the current task first.');
@@ -49,38 +100,28 @@ export class TtsService {
     try {
       await this.pending;
       const state = await this.load();
-      if (!state.settings.providerId) throw new Error('Save a TTS provider in Settings before dubbing.');
-      const resolved = await this.providers.resolve(state.settings.providerId, 'tts');
-      const apiKey = state.apiKey ? (this.vault ? this.vault.decrypt(state.apiKey) : state.apiKey) : resolved.context.apiKey;
-      if (!apiKey) throw new Error('Save an Alibaba Cloud API key in the TTS/provider settings.');
-      return await action({ baseUrl: resolved.context.baseUrl, apiKey });
+      let access: { baseUrl: string; apiKey: string };
+      try { access = await this.resolveAccess(state); }
+      catch { throw new Error('Save a TTS Base URL and Alibaba Cloud API key in Settings before dubbing.'); }
+      const root = alibabaApiRoot(access.baseUrl);
+      if (!root) throw new Error('Use an official Alibaba Cloud /api/v1 endpoint (DashScope or workspace).');
+      if (!access.apiKey) throw new Error('Save an Alibaba Cloud API key in the TTS settings.');
+      return await action({ baseUrl: root, apiKey: access.apiKey });
     } finally { this.dubbingActive = false; }
   }
 
   async dubbingContextInfo(): Promise<{ providerName: string; baseUrl: string; hasApiKey: boolean; model?: string }> {
     try {
       const state = await this.load();
-      if (!state.settings.providerId) return { providerName: '', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', hasApiKey: false, model: state.settings.model };
-      const resolved = await this.providers.resolve(state.settings.providerId, 'tts');
-      const apiKey = state.apiKey ? (this.vault ? this.vault.decrypt(state.apiKey) : state.apiKey) : resolved.context.apiKey;
-      let baseUrl = resolved.context.baseUrl;
-      try {
-        const u = new URL(baseUrl);
-        if (u.hostname === 'dashscope.aliyuncs.com') baseUrl = 'https://dashscope.aliyuncs.com/api/v1';
-        else if (u.hostname === 'dashscope-intl.aliyuncs.com') baseUrl = 'https://dashscope-intl.aliyuncs.com/api/v1';
-        else if (/^[a-z0-9-]+\.(cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$/.test(u.hostname)) baseUrl = `https://${u.hostname}/api/v1`;
-        else if (!baseUrl.endsWith('/api/v1')) baseUrl = 'https://dashscope.aliyuncs.com/api/v1';
-      } catch {
-        baseUrl = 'https://dashscope.aliyuncs.com/api/v1';
-      }
+      const access = await this.resolveAccess(state);
       return {
-        providerName: resolved.provider.name,
-        baseUrl,
-        hasApiKey: !!apiKey,
+        providerName: access.providerName,
+        baseUrl: alibabaApiRoot(access.baseUrl) || alibabaApiRoot(DEFAULT_TTS_BASE_URL) || DEFAULT_TTS_BASE_URL,
+        hasApiKey: !!access.apiKey,
         model: state.settings.model,
       };
     } catch {
-      return { providerName: '', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', hasApiKey: false };
+      return { providerName: '', baseUrl: DEFAULT_TTS_BASE_URL, hasApiKey: false };
     }
   }
 
@@ -161,16 +202,14 @@ export class TtsService {
         const state = await this.load();
         const config = state.settings;
         controller.signal.throwIfAborted();
-        if (!config.providerId) throw new Error();
-        const resolved = await this.providers.resolve(config.providerId, 'tts');
-        controller.signal.throwIfAborted();
-        let customKey = '';
-        if (state.apiKey) {
-          try { customKey = this.vault ? this.vault.decrypt(state.apiKey) : state.apiKey; }
-          catch { throw new Error('Unable to decrypt speech credentials. Save the key again.'); }
+        let access: { baseUrl: string; apiKey: string; tts: NonNullable<typeof fallbackTts> };
+        try { access = await this.resolveAccess(state); }
+        catch (error) {
+          if (error instanceof Error && /decrypt/.test(error.message)) throw error;
+          throw new Error();
         }
-        const context = customKey ? { ...resolved.context, apiKey: customKey } : resolved.context;
-        const http = resolved.adapter.tts!.build(context, {
+        controller.signal.throwIfAborted();
+        const http = access.tts.build({ baseUrl: access.baseUrl, apiKey: access.apiKey }, {
           text: inputText, model: config.model, voice: config.voice, speed: config.speed, fullUrl: config.fullUrl,
         });
         const response = await fetch(http.url, { ...http.init, redirect: 'error', signal: controller.signal });
@@ -220,7 +259,8 @@ export class TtsService {
           throw new Error();
         }
 
-        if (!response.ok || !['audio/mpeg', 'audio/mp3'].includes(mime ?? '') ||
+        const validAudioMimes = ['audio/mpeg', 'audio/mp3', 'application/octet-stream', 'audio/x-mpeg', 'audio/wav', 'audio/x-wav'];
+        if (!response.ok || !validAudioMimes.includes(mime ?? '') ||
           Number(response.headers.get('content-length')) > MAX_AUDIO_BYTES) {
           void response.body?.cancel().catch(() => {});
           throw new Error();
