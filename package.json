@@ -18,7 +18,7 @@
     "test:web": "npm run build:electron && electron dist/scripts/browser-settings-smoke.js",
     "check": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.renderer.json",
     "icon": "npm run build:electron && electron dist/scripts/create-icon.js",
-    "dist": "npm run build && electron-builder --win portable"
+    "dist": "npm run build && npm run icon && electron-builder --win nsis"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
@@ -58,15 +58,53 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "scripts/audio-separation.py", "to": "audio-separation.py" }
+      { "from": "scripts/audio-separation.py", "to": "audio-separation.py" },
+      { "from": "scripts/roformer-separation.py", "to": "roformer-separation.py" },
+      {
+        "from": "plugins",
+        "to": "plugins",
+        "filter": [
+          "**/*",
+          "!runtime/**",
+          "!**/.venv/**",
+          "!**/models/**",
+          "!**/cache/**",
+          "!**/tmp/**",
+          "!**/logs/**",
+          "!**/outputs/**",
+          "!**/inputs/**",
+          "!**/fixtures/**",
+          "!**/upstream/**",
+          "!**/nltk-source/**",
+          "!**/downloads/**",
+          "!**/nltk_data/**",
+          "!**/.state/**",
+          "!**/state/**",
+          "!**/references/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.wav",
+          "!**/*.smoke.json",
+          "!**/models.verified.json",
+          "!**/runtime.manifest.json",
+          "!**/repair-plan.json"
+        ]
+      }
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/ffmpeg.exe"
     ],
     "win": {
-      "target": "portable",
+      "target": "nsis",
       "icon": "icon/lingvoice-logo.ico",
-      "artifactName": "LingVoice-${version}.exe"
+      "artifactName": "LingVoice-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

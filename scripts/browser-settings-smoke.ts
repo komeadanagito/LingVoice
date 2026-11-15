@@ -20,7 +20,7 @@ async function waitFor(window: BrowserWindow, expression: string) {
     if (await window.webContents.executeJavaScript(expression)) return;
     await pause(50);
   }
-  const feedback = await window.webContents.executeJavaScript("Array.from(document.querySelectorAll('[role=alert], .subtitle-hint, .transcript-cue-text, .subtitle-stage-actions')).map(node => node.textContent).join(' | ')");
+  const feedback = await window.webContents.executeJavaScript("Array.from(document.querySelectorAll('[role=alert], .task-history-execution, .subtitle-hint, .transcript-cue-text, .subtitle-stage-actions')).map(node => node.textContent).join(' | ')");
   throw new Error(`Timed out: ${expression}. Feedback: ${feedback}`);
 }
 async function freePort(): Promise<number> {
@@ -160,7 +160,7 @@ app.whenReady().then(async () => {
     console.log('PASS: Web settings save, real server-side translation, persisted bindings, no plaintext credential storage in browser.');
     const wav = [...pcmWav(Buffer.alloc(32000))];
     await window.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.player-actions input[type=file]');
+      const input = document.querySelector('.video-player-card:not([hidden]) .player-actions input[type=file]');
       const data = new DataTransfer();
       data.items.add(new File([new Uint8Array(${JSON.stringify(wav)})], 'speech.mp4', { type: 'video/mp4' }));
       input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -240,10 +240,10 @@ app.whenReady().then(async () => {
     await waitFor(window, "document.querySelectorAll('.transcript-cue-translation').length === 31 && !document.querySelector('.dubbing-main-button').disabled");
     assert.deepEqual(await window.webContents.executeJavaScript('window.__resumeSizes'), [30, 1, 1], 'Retry translates only the missing batch and preserves all results');
     console.log('PASS: translation retry retains 30 completed cues and fills the remaining batch.');
-    const durableSource = await window.webContents.executeJavaScript("document.querySelector('.player-viewport video').src");
+    const durableSource = await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src");
     await window.webContents.executeJavaScript(`(() => {
       window.lingvoice.runDubbing = async payload => ({ ok: true, data: {
-        jobId: payload.jobId, video: ${JSON.stringify(durableSource)}, audio: ${JSON.stringify(durableSource)},
+        jobId: payload.jobId, video: ${JSON.stringify(`${durableSource}#dubbed`)}, audio: ${JSON.stringify(durableSource)},
         subtitles: ${JSON.stringify(durableSource)}, cues: payload.cues, preview: false,
         targetLanguage: 'zh', voiceId: 'history-test-voice'
       } });
@@ -251,15 +251,31 @@ app.whenReady().then(async () => {
     })()`);
     await waitFor(window, "!!document.querySelector('.dubbing-result-card') && document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'");
     assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.task-history-row').length"), 1);
-    const originalBlobUrl = await window.webContents.executeJavaScript("document.querySelector('.player-viewport video').src");
+    await waitFor(window, "document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:last-child')?.getAttribute('aria-pressed') === 'true'");
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src"), `${durableSource}#dubbed`);
+    assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.dubbing-result-card audio').length"), 0, 'Dubbing plays in the video player, with no separate competing audio player');
+    await waitFor(window, "document.querySelector('.video-player-card:not([hidden]) .player-viewport video').readyState >= 2 && !document.querySelector('.player-spinner')");
+    await window.webContents.executeJavaScript("(() => { const v = document.querySelector('.video-player-card:not([hidden]) .player-viewport video'); v.pause(); v.currentTime = 0.35; })()");
+    await waitFor(window, "Math.abs(document.querySelector('.video-player-card:not([hidden]) .player-viewport video').currentTime - 0.35) < 0.05");
+    await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:first-child').click()");
+    await waitFor(window, "document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:first-child')?.getAttribute('aria-pressed') === 'true' && document.querySelector('.video-player-card:not([hidden]) .player-viewport video').readyState >= 2 && !document.querySelector('.player-spinner')");
+    const switchedPlayback = await window.webContents.executeJavaScript("(() => { const v = document.querySelector('.video-player-card:not([hidden]) .player-viewport video'); return { time: v.currentTime, paused: v.paused }; })()");
+    assert.ok(Math.abs(switchedPlayback.time - 0.35) < 0.05, 'Switching versions retains the playback position');
+    assert.equal(switchedPlayback.paused, true, 'Switching versions retains paused state');
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src"), durableSource);
+    assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.transcript-cue-translation').length"), 31, 'Switching versions retains subtitle work');
+    await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:last-child').click()");
+    await waitFor(window, "document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:last-child')?.getAttribute('aria-pressed') === 'true'");
+    console.log('PASS: dubbed video auto-loads, original/dubbed switching preserves subtitles and uses one player.');
     await window.webContents.executeJavaScript('window.__stopProgress?.()');
     await window.loadURL(`http://127.0.0.1:${port}`);
     await waitFor(window, "document.querySelectorAll('.transcript-cue-translation').length === 31 && !!document.querySelector('.dubbing-result-card') && !document.querySelector('.dubbing-main-button').disabled && document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'");
     assert.equal(await window.webContents.executeJavaScript("document.querySelector('.task-history-meta').textContent.includes('配音完成')"), true);
     assert.equal(await window.webContents.executeJavaScript("document.querySelector('.dubbing-result-actions a').getAttribute('href')"), durableSource);
-    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.player-viewport video').src"), originalBlobUrl, 'Reload restores the same durable server media URL');
+    await waitFor(window, "document.querySelector('.video-player-card:not([hidden]) .player-source-switch button:last-child')?.getAttribute('aria-pressed') === 'true'");
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src"), durableSource, 'Reload restores the canonical durable server media URL for the dubbed version');
     assert.equal(await window.webContents.executeJavaScript(`(async () => {
-      const response = await fetch(document.querySelector('.player-viewport video').src);
+      const response = await fetch(document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src);
       const bytes = new Uint8Array(await response.arrayBuffer());
       const expected = ${JSON.stringify(wav)};
       return response.ok && bytes.length === expected.length && bytes.every((value, index) => value === expected[index]);
@@ -267,7 +283,7 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript("document.querySelector('#sidebar-navigation .nav-item').click()");
     await waitFor(window, "!document.querySelector('.transcript-cue-item') && document.querySelectorAll('.task-history-row').length === 1");
     await window.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.player-actions input[type=file]');
+      const input = document.querySelector('.video-player-card:not([hidden]) .player-actions input[type=file]');
       const data = new DataTransfer();
       data.items.add(new File([new Uint8Array(${JSON.stringify(wav)})], 'second-video.mp4', { type: 'video/mp4' }));
       input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -291,6 +307,8 @@ app.whenReady().then(async () => {
     window.setSize(620, 720);
     await pause(250);
     assert.equal(await window.webContents.executeJavaScript('document.documentElement.scrollWidth <= window.innerWidth'), true, 'Task history does not introduce horizontal page overflow');
+    await window.webContents.executeJavaScript("document.querySelector('.task-history-open').click()");
+    await waitFor(window, "!!document.querySelector('.subtitle-offset input')");
     await window.webContents.executeJavaScript(`(() => {
       window.__originalHistorySave = window.lingvoice.saveHistoryTask;
       window.lingvoice.saveHistoryTask = async () => ({ ok: false, error: 'Test SQLite disk full' });
@@ -321,7 +339,7 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript("document.querySelector('#inspect').click()");
     await waitFor(window, "document.querySelectorAll('.task-history-row').length === 2 && !document.querySelector('#download').disabled");
     await window.webContents.executeJavaScript("document.querySelector('#download').click()");
-    await waitFor(window, `document.querySelector('.player-viewport video')?.src === ${JSON.stringify(durableSource)} && document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'`);
+    await waitFor(window, `document.querySelector('.video-player-card:not([hidden]) .player-viewport video')?.src === ${JSON.stringify(durableSource)} && document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'`);
     assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.task-history-row').length"), 2, 'Downloading updates its inspected task rather than creating a duplicate');
     console.log('PASS: inspected link and downloaded source share one persistent task.');
     const legacyId = await window.webContents.executeJavaScript(`(async () => {
@@ -350,7 +368,7 @@ app.whenReady().then(async () => {
     await window.webContents.session.clearStorageData({ origin: `http://127.0.0.1:${port}`, storages: ['indexdb', 'localstorage'] });
     await window.loadURL(`http://127.0.0.1:${port}`);
     await waitFor(window, "document.querySelectorAll('.task-history-row').length === 3 && document.querySelectorAll('.transcript-cue-translation').length === 31");
-    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.player-viewport video').src.startsWith(location.origin + '/api/lingvoice/media/')"), true);
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('.video-player-card:not([hidden]) .player-viewport video').src.startsWith(location.origin + '/api/lingvoice/media/')"), true);
     assert.equal((await fs.readFile(path.join(directory, 'history.sqlite'))).subarray(0, 16).toString(), 'SQLite format 3\u0000');
     await waitFor(window, "document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'");
     assert.equal(await window.webContents.executeJavaScript("!!document.querySelector('.sidebar .task-history-save') || document.querySelector('.sidebar').textContent.includes('已保存到 SQLite')"), false, 'Successful saves have no persistent sidebar description');
@@ -364,6 +382,48 @@ app.whenReady().then(async () => {
     await waitFor(window, "document.querySelector('#tts-token-plan-hint')?.textContent.includes('voice-enrollment')");
     assert.equal(await window.webContents.executeJavaScript("document.getElementById('tts-base-url').getAttribute('aria-describedby')"), 'tts-token-plan-hint');
     console.log('PASS: Token Plan endpoint shows native-API and cloning-permission guidance without issuing a paid request.');
+    await window.webContents.executeJavaScript(`(() => {
+      window.confirm = () => true;
+      window.__batchCalls = [];
+      window.lingvoice.transcribe = async request => {
+        window.__batchCalls.push(request.file);
+        if (window.__batchCalls.length === 1) await new Promise(resolve => { window.__releaseBatch = resolve; });
+        return { ok: true, data: [{ id: 1, start: 0, end: 1, text: 'Batch source sentence.' }] };
+      };
+      window.lingvoice.translateSubtitles = async payload => ({ ok: true, data: payload.texts.map(() => 'Batch translated sentence.') });
+      window.lingvoice.reviewTranslation = async () => ({ ok: true, data: [] });
+      window.lingvoice.runDubbing = async payload => ({ ok: true, data: {
+        jobId: payload.jobId, video: ${JSON.stringify(durableSource)}, audio: ${JSON.stringify(durableSource)},
+        subtitles: ${JSON.stringify(durableSource)}, cues: payload.cues, preview: false, targetLanguage: 'en', voiceId: 'batch-fixture'
+      } });
+      document.querySelector('.nav-history').click();
+    })()`);
+    await waitFor(window, "!document.querySelector('.history-page').hidden");
+    await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('.task-history-file-import input');
+      const data = new DataTransfer();
+      for (const name of ['batch-a.mp4', 'batch-b.mp4']) data.items.add(new File([new Uint8Array(${JSON.stringify(wav)})], name, { type: 'video/mp4' }));
+      input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(window, "document.querySelectorAll('.task-history-row').length === 5 && document.querySelector('.sidebar-save-status')?.dataset.saveState === 'saved'");
+    await window.webContents.executeJavaScript(`(() => {
+      for (const row of document.querySelectorAll('.task-history-row')) if (/batch-[ab]\\.mp4/.test(row.textContent)) row.querySelector('input[type=checkbox]').click();
+    })()`);
+    await waitFor(window, "!document.querySelector('.task-history-run').disabled");
+    await window.webContents.executeJavaScript("document.querySelector('.task-history-run').click()");
+    await waitFor(window, "window.__batchCalls.length === 1 && !!window.__releaseBatch");
+    assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.task-history-badge.is-queued').length"), 1, 'Second batch task waits rather than competing for ASR/GPU');
+    await window.webContents.executeJavaScript("document.querySelector('.sidebar-settings').click()");
+    await waitFor(window, "!document.querySelector('.settings-page').hidden");
+    await window.webContents.executeJavaScript("document.querySelector('.nav-history').click(); Array.from(document.querySelectorAll('.task-history-open')).find(node => node.textContent.includes('Legacy migration fixture')).click()");
+    await waitFor(window, "!document.querySelector('.main-content').hidden && document.querySelectorAll('.transcript-cue-translation').length === 31");
+    assert.equal(await window.webContents.executeJavaScript('window.__batchCalls.length'), 1, 'Switching task and settings does not restart or discard a running task');
+    await window.webContents.executeJavaScript("window.__releaseBatch(); document.querySelector('.nav-history').click()");
+    await waitFor(window, "Array.from(document.querySelectorAll('.task-history-row')).filter(row => /batch-[ab]\\.mp4/.test(row.textContent) && row.querySelector('.task-history-badge.is-completed')).length === 2");
+    assert.equal(await window.webContents.executeJavaScript('window.__batchCalls.length'), 2);
+    await window.webContents.executeJavaScript("Array.from(document.querySelectorAll('.task-history-open')).find(node => node.textContent.includes('batch-a.mp4')).click()");
+    await waitFor(window, "!!document.querySelector('.dubbing-result-card') && document.querySelectorAll('.transcript-cue-translation').length === 1 && !document.querySelector('.dubbing-main-button').disabled");
+    console.log('PASS: two imported local videos execute serially through transcription, translation and dubbing; switching settings and tasks retains work and completed results.');
     window.destroy(); window = undefined;
     await vite.close(); vite = undefined;
     upstream.closeAllConnections();

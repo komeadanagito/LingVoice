@@ -30,9 +30,15 @@ function cues(value: unknown, speech = false) {
 }
 export function validateHistoryTask(value: unknown): HistoryTask {
   try { if (Buffer.byteLength(JSON.stringify(value) ?? '') > MAX_HISTORY_BYTES) invalid(); } catch { invalid(); }
-  const task = object(value, ['id', 'title', 'createdAt', 'updatedAt', 'file', 'embed', 'subtitles']);
+  const task = object(value, ['id', 'title', 'createdAt', 'updatedAt', 'file', 'embed', 'sourceUrl', 'subtitles']);
   validateHistoryId(task.id); text(task.title); text(task.file, 16384); text(task.embed);
   number(task.createdAt); number(task.updatedAt);
+  if (task.sourceUrl !== undefined) {
+    text(task.sourceUrl, 16384);
+    let url: URL;
+    try { url = new URL(task.sourceUrl); } catch { return invalid(); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) invalid();
+  }
   if (task.createdAt < 0 || task.updatedAt < 0) invalid();
   if (task.embed) {
     let url: URL;

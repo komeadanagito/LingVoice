@@ -94,8 +94,8 @@ export async function mixDubbedVideo(request: AudioMixRequest, options: AudioOpt
     const useDucking = request.segments.length > 0 && backgroundGain > 0 && dialogueGain > 0;
     const filterScript = useDucking
       ? `[0:a]aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo,volume=${backgroundGain}[bg];\n` +
-        `[1:a]highpass=f=80,aformat=sample_fmts=s16:channel_layouts=stereo,volume=${dialogueGain},asplit=2[voice][sc];\n` +
-        `[bg][sc]sidechaincompress=threshold=0.03:ratio=4:attack=25:release=300:makeup=1[bg_ducked];\n` +
+        `[1:a]highpass=f=85,equalizer=f=280:t=q:w=1.2:g=-2.0,equalizer=f=3200:t=q:w=1.1:g=3.0,equalizer=f=7000:t=q:w=1.0:g=2.0,acompressor=threshold=-20dB:ratio=2.2:attack=10:release=120:makeup=1.5,aformat=sample_fmts=s16:channel_layouts=stereo,volume=${dialogueGain},asplit=2[voice][sc];\n` +
+        `[bg][sc]sidechaincompress=threshold=0.02:ratio=5:attack=15:release=250:makeup=1[bg_ducked];\n` +
         `[bg_ducked][voice]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=0:latency=1,apad=whole_len=${totalFrames},atrim=end_sample=${totalFrames},asetpts=PTS-STARTPTS[mix]\n`
       : `[0:a]aresample=48000,aformat=channel_layouts=stereo,volume=${backgroundGain}[bg];\n` +
         `[1:a]volume=${dialogueGain}[voice];\n` +

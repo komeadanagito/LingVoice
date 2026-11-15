@@ -33,7 +33,7 @@ export function Sidebar({ collapsed, page, onNavigate, taskCount, historyReady, 
         </button>
         <button type="button" className={`nav-item nav-history${page === 'history' ? ' active' : ''}`} onClick={() => onNavigate('history')} aria-current={page === 'history' ? 'page' : undefined}>
           <Icon name="history" size={18} />
-          <span className="nav-label">{zh ? '历史记录' : 'History'}</span>
+          <span className="nav-label">{t('nav.history')}</span>
           <span className="nav-count">{taskCount}</span>
         </button>
       </nav>

@@ -7,6 +7,7 @@ import { useSubtitleTrack } from './SubtitleTrack';
 import type { SavedSubtitles } from '../utils/task-history';
 
 interface Props {
+  active?: boolean;
   taskId?: string;
   mediaFile?: File;
   savedSubtitles?: SavedSubtitles;
@@ -45,8 +46,11 @@ function formatTime(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles, onOpenFile, onOpenRecent, subtitleToolsHost, initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
-  const { t } = useI18n();
+export function VideoPlayer({ active = true, taskId, mediaFile, savedSubtitles, onSaveSubtitles, onOpenFile, onOpenRecent, subtitleToolsHost, initialFile, initialEmbed = '', initialTitle, recentDownloadedFile, recentDownloadedTitle }: Props) {
+  const { t, locale } = useI18n();
+  const zh = locale === 'zh-CN';
+  const [playbackSource, setPlaybackSource] = useState<'original' | 'dubbed'>('original');
+  const pendingPlayback = useRef<{ time: number; playing: boolean } | null>(null);
   const [embedSrc, setEmbedSrc] = useState(initialEmbed);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -76,6 +80,39 @@ export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const dubbedSrc = subtitles.result?.video ? filePathToMediaUrl(subtitles.result.video) : '';
+  const showingDubbed = playbackSource === 'dubbed' && Boolean(dubbedSrc);
+  const displayedSrc = showingDubbed ? dubbedSrc : videoSrc;
+  const canDownloadCurrent = Boolean(displayedSrc) && !(Boolean(embedSrc) && !showingDubbed);
+  const safeBaseTitle = (videoTitle || (zh ? '视频' : 'video'))
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\.[a-zA-Z0-9]{2,5}$/, '')
+    .trim() || 'video';
+  const originalExtMatch = (initialFile || mediaFile?.name || '').match(/\.([a-zA-Z0-9]{2,5})(?:[?#].*)?$/);
+  const originalExt = originalExtMatch ? `.${originalExtMatch[1].toLowerCase()}` : '.mp4';
+  const dubbedExtMatch = (subtitles.result?.video || '').match(/\.([a-zA-Z0-9]{2,5})(?:[?#].*)?$/);
+  const dubbedExt = dubbedExtMatch ? `.${dubbedExtMatch[1].toLowerCase()}` : '.mp4';
+  const downloadFilename = showingDubbed ? `${safeBaseTitle}-dubbed${dubbedExt}` : `${safeBaseTitle}${originalExt}`;
+  const downloadLabel = zh
+    ? (showingDubbed ? '下载配音视频' : '下载原视频')
+    : (showingDubbed ? 'Download dubbed' : 'Download original');
+
+  const switchPlaybackSource = useCallback((source: 'original' | 'dubbed') => {
+    const video = videoRef.current;
+    pendingPlayback.current = { time: video?.currentTime ?? 0, playing: video ? !video.paused : false };
+    video?.pause();
+    setFailed(false);
+    setLoading(true);
+    setIsPlaying(false);
+    setPlaybackSource(source);
+  }, []);
+
+  // Keep subtitles and ASR bound to the original media, not the selected rendition.
+  // A new completed result is loaded in the single video element automatically.
+  useEffect(() => {
+    if (dubbedSrc) switchPlaybackSource('dubbed');
+    else if (playbackSource === 'dubbed') switchPlaybackSource('original');
+  }, [dubbedSrc, switchPlaybackSource]);
 
   useEffect(() => {
     if (mediaFile) {
@@ -117,12 +154,21 @@ export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles
     }
   };
 
+  useEffect(() => { if (!active) videoRef.current?.pause(); }, [active]);
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setDuration(videoRef.current.duration);
-      void videoRef.current.play().catch(() => {
-        // Autoplay may be prevented until user interaction
-      });
+      const video = videoRef.current;
+      setDuration(video.duration);
+      video.volume = volume;
+      video.muted = isMuted;
+      video.playbackRate = playbackRate;
+      const pending = pendingPlayback.current;
+      pendingPlayback.current = null;
+      if (pending) {
+        video.currentTime = Math.min(pending.time, Number.isFinite(video.duration) ? Math.max(0, video.duration - 0.01) : pending.time);
+        setCurrentTime(video.currentTime);
+      }
+      if (active && (!pending || pending.playing)) void video.play().catch(() => setIsPlaying(false));
     }
   };
 
@@ -224,11 +270,22 @@ export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles
   };
 
   return (
-    <section className="card video-player-card" ref={containerRef}>
+    <section className="card video-player-card" hidden={!active} ref={containerRef}>
       <div className="player-header">
         <div className="player-title-info">
           <span className="player-icon"><Icon name="play" size={16} /></span>
           <h2>{t('player.title')}</h2>
+          <div className="player-source-switch" role="group" aria-label={zh ? '视频版本' : 'Video version'}>
+            <button type="button" aria-pressed={!showingDubbed} disabled={!videoSrc && !embedSrc}
+              onClick={() => { if (showingDubbed) switchPlaybackSource('original'); }}>
+              {zh ? '原视频' : 'Original'}
+            </button>
+            <button type="button" aria-pressed={showingDubbed} disabled={!dubbedSrc}
+              title={!dubbedSrc ? (zh ? '完成配音后即可切换' : 'Generate dubbing to enable this version') : undefined}
+              onClick={() => { if (!showingDubbed) switchPlaybackSource('dubbed'); }}>
+              {zh ? '配音视频' : 'Dubbed video'}
+            </button>
+          </div>
           <span id="video-title" className="sr-only">{videoTitle}</span>
         </div>
         <div className="player-actions">
@@ -239,6 +296,25 @@ export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles
             style={{ display: 'none' }}
             onChange={handleFileInputChange}
           />
+          {canDownloadCurrent ? (
+            <a
+              className="choose-file-button player-download-button"
+              href={displayedSrc}
+              download={downloadFilename}
+              title={downloadLabel}
+            >
+              <Icon name="download" size={15} /> {downloadLabel}
+            </a>
+          ) : (
+            <button
+              className="choose-file-button player-download-button"
+              type="button"
+              disabled
+              title={downloadLabel}
+            >
+              <Icon name="download" size={15} /> {downloadLabel}
+            </button>
+          )}
           <button
             className="choose-file-button"
             type="button"
@@ -256,13 +332,13 @@ export function VideoPlayer({ taskId, mediaFile, savedSubtitles, onSaveSubtitles
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {embedSrc ? (
+        {embedSrc && !showingDubbed ? (
           <iframe className="platform-player" src={embedSrc} title={videoTitle || t('player.title')} allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" onLoad={() => setLoading(false)} />
-        ) : videoSrc ? (
+        ) : displayedSrc ? (
           <>
             <video
               ref={videoRef}
-              src={videoSrc}
+              src={displayedSrc}
               onClick={togglePlay}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}

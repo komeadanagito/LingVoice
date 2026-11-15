@@ -1,4 +1,7 @@
+import type { InferenceMode } from './local-models';
+
 export interface AsrSettings {
+  mode?: InferenceMode;
   providerId?: string;
   baseUrl: string;
   fullUrl: boolean;

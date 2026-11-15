@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "id": "qwen-asr",
+      "repo": "Qwen/Qwen3-ASR-1.7B-hf",
+      "modelscope_repo": "Qwen/Qwen3-ASR-1.7B-hf",
+      "revision": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
+      "directory": "asr/models/qwen3-asr-1.7b"
+    },
+    {
+      "id": "qwen-aligner",
+      "repo": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+      "modelscope_repo": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+      "revision": "c07281df297b9905d24a508279258cccf987a064",
+      "directory": "asr/models/qwen3-forced-aligner-0.6b"
+    },
+    {
+      "id": "gemma-e2b",
+      "repo": "google/gemma-4-E2B-it",
+      "modelscope_repo": "google/gemma-4-E2B-it",
+      "revision": "4adf15748de9e1a0097b6274cee9c15836c41c37",
+      "directory": "translation/models/gemma-4-e2b-it"
+    },
+    {
+      "id": "separation",
+      "repo": "anvuew/karaoke_bs_roformer",
+      "modelscope_repo": "",
+      "revision": "0d4423d42e12cf2ba39ae09171028507b8a2a7be",
+      "directory": "separation/models/karaoke-bs-roformer",
+      "files": [
+        "karaoke_bs_roformer_anvuew.ckpt",
+        "karaoke_bs_roformer_anvuew.yaml"
+      ]
+    }
+  ]
+}

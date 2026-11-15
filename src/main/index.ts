@@ -5,6 +5,7 @@ import { TtsService } from './tts';
 import { DubbingService } from './dubbing';
 import { AsrService } from './asr';
 import { ProviderService } from './providers';
+import { LocalPluginManager } from './local-plugins';
 import { mediaResponse } from './media';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -40,6 +41,7 @@ let downloader: Downloader | undefined;
 let ttsService: TtsService | undefined;
 let dubbingService: DubbingService | undefined;
 let asrService: AsrService | undefined;
+let localPluginManager: LocalPluginManager | undefined;
 let settings: Settings | undefined;
 let systemLocale: Locale = defaultLocale;
 let cookieFile = '';
@@ -137,13 +139,21 @@ async function createWindow(): Promise<void> {
     if (translationConfig.settings.providerId === id || asrConfig.settings.providerId === id || ttsConfig.settings.providerId === id) throw new Error('该 Provider 正在被使用，请先修改翻译/ASR/TTS 绑定。 / Provider is in use. Change task bindings first.');
     await providers.remove(id);
   });
-  const translation = new TranslationService(path.join(app.getPath('userData'), 'translation.json'), vault, providers);
-  const tts = new TtsService(path.join(app.getPath('userData'), 'tts.json'), providers, vault);
+  const localPlugins = new LocalPluginManager(undefined, progress => {
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('localModels:downloadProgress', progress);
+  });
+  localPluginManager = localPlugins;
+  handle('localModels:status', () => localPlugins.status());
+  handle('localModels:stop', id => localPlugins.stop(id));
+  handle('localModels:download', request => localPlugins.downloadModels(request));
+  handle('localModels:cancelDownload', () => localPlugins.cancelDownload());
+  const translation = new TranslationService(path.join(app.getPath('userData'), 'translation.json'), vault, providers, localPlugins);
+  const tts = new TtsService(path.join(app.getPath('userData'), 'tts.json'), providers, vault, localPlugins);
   ttsService = tts;
   const dubbing = new DubbingService({
     directory: path.join(app.getPath('userData'), 'dubbing'), ffmpegPath,
     helperPath: app.isPackaged ? path.join(process.resourcesPath, 'audio-separation.py') : path.resolve(__dirname, '../../../scripts/audio-separation.py'),
-    tts, translation,
+    tts, translation, localPlugins,
     emit: progress => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('dubbing:progress', progress); },
   });
   dubbingService = dubbing;
@@ -156,7 +166,7 @@ async function createWindow(): Promise<void> {
   handle('dubbing:deleteVoice', voiceId => dubbing.deleteVoice(voiceId));
   const asr = new AsrService(path.join(app.getPath('userData'), 'asr.json'), vault, ffmpegPath, progress => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('asr:progress', progress);
-  }, {}, providers);
+  }, { localPlugins }, providers);
   asrService = asr;
   handle('asr:config', () => asr.getConfig());
   handle('asr:save', update => asr.saveConfig(update));
@@ -253,5 +263,5 @@ else {
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { downloader?.cancel(); asrService?.cancel(); ttsService?.cancel(); dubbingService?.cancel(); });
+  app.on('before-quit', () => { downloader?.cancel(); asrService?.cancel(); ttsService?.cancel(); dubbingService?.cancel(); void localPluginManager?.dispose(); });
 }

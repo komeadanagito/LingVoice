@@ -54,7 +54,7 @@ export async function detectWavTrimBounds(
 /** Times are absolute seconds on the original media timeline; shorter speech is never slowed. */
 export function planAlignment(sourceDuration: number, start: number, end: number, maxTempo = 1.15): AlignmentPlan {
   finiteSeconds(sourceDuration, 'source duration'); finiteSeconds(start, 'segment start', true); finiteSeconds(end, 'segment end');
-  if (!Number.isFinite(maxTempo) || maxTempo < 1 || maxTempo > 2) throw new Error('Invalid maxTempo.');
+  if (!Number.isFinite(maxTempo) || maxTempo < 1 || maxTempo > 8) throw new Error('Invalid maxTempo.');
   const duration = end - start;
   if (duration < 1 / 48000) throw new Error('Segment must contain at least one 48 kHz sample.');
   const ratio = sourceDuration / duration;
@@ -151,7 +151,14 @@ export async function alignAudio(segment: AudioSegment, outputPath: string, opti
     filters.push(`atrim=start=${trim.trimStart.toFixed(6)}:end=${trim.trimEnd.toFixed(6)}`, 'asetpts=PTS-STARTPTS');
   }
   filters.push(`aresample=48000`, `aformat=sample_fmts=s16:channel_layouts=stereo`);
-  if (plan.tempo > 1) filters.push(`atempo=${plan.tempo.toFixed(12)}`);
+  if (plan.tempo > 1) {
+    let remaining = plan.tempo;
+    while (remaining > 2) {
+      filters.push('atempo=2.0');
+      remaining /= 2;
+    }
+    filters.push(`atempo=${remaining.toFixed(12)}`);
+  }
   // atrim only establishes the exact sample boundary after tempo conversion/padding.
   filters.push(`apad=whole_len=${frames}`, `atrim=end_sample=${frames}`, 'asetpts=PTS-STARTPTS');
   const info = await atomicAudioFile(outputPath, options.signal, async temporary => {

@@ -5,6 +5,7 @@ import type { AsrConfig, AsrConfigUpdate, AsrCue, AsrProgress, AsrRequest } from
 import type { TtsAudio, TtsConfig, TtsConfigUpdate, TtsRequest } from './tts';
 import type { DubbingConfig, DubbingEnvironment, DubbingSettings, DubbingRequest, DubbingResult, DubbingProgress } from './dubbing';
 import type { ProviderCatalog, ProviderUpdate, Provider } from './providers';
+import type { LocalModelDownloadProgress, LocalModelDownloadRequest, LocalModelsStatus, LocalPluginId } from './local-models';
 
 export interface VideoInfo {
   titleKey?: MessageKey;
@@ -49,6 +50,10 @@ export interface IpcContract {
   'dubbing:cancel': { args: [jobId: string]; result: void };
   'dubbing:clear': { args: []; result: void };
   'dubbing:deleteVoice': { args: [voiceId: string]; result: void };
+  'localModels:status': { args: []; result: LocalModelsStatus };
+  'localModels:stop': { args: [id?: LocalPluginId]; result: LocalModelsStatus };
+  'localModels:download': { args: [request: LocalModelDownloadRequest]; result: LocalModelsStatus };
+  'localModels:cancelDownload': { args: []; result: LocalModelsStatus };
   'providers:list': { args: []; result: ProviderCatalog };
   'providers:save': { args: [update: ProviderUpdate]; result: Provider };
   'providers:models': { args: [id: string]; result: string[] };
@@ -95,6 +100,11 @@ export interface LingVoiceApi {
   clearDubbingCache(): Promise<IpcResult<void>>;
   deleteDubbingVoice(voiceId: string): Promise<IpcResult<void>>;
   onDubbingProgress(callback: (progress: DubbingProgress) => void): () => void;
+  localModelsStatus?(): Promise<IpcResult<LocalModelsStatus>>;
+  stopLocalModels?(id?: LocalPluginId): Promise<IpcResult<LocalModelsStatus>>;
+  downloadLocalModels?(request: LocalModelDownloadRequest): Promise<IpcResult<LocalModelsStatus>>;
+  cancelLocalModelsDownload?(): Promise<IpcResult<LocalModelsStatus>>;
+  onLocalModelsDownloadProgress?(callback: (progress: LocalModelDownloadProgress) => void): () => void;
   providers(): Promise<IpcResult<ProviderCatalog>>;
   saveProvider(update: ProviderUpdate): Promise<IpcResult<Provider>>;
   providerModels(id: string): Promise<IpcResult<string[]>>;

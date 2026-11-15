@@ -1,0 +1,6 @@
+transformers==5.23.0
+accelerate==1.15.0
+bitsandbytes==0.50.2
+sentencepiece
+safetensors
+Pillow

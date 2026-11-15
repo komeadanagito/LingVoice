@@ -15,3 +15,22 @@ video/
 *.key
 __pycache__/
 *.py[cod]
+scripts/diag_*.ts
+
+# Local model plugins: keep scripts/configuration, exclude machine-specific artifacts.
+plugins/runtime/
+plugins/**/.venv/
+plugins/**/models/
+plugins/**/cache/
+plugins/**/tmp/
+plugins/**/logs/
+plugins/**/outputs/
+plugins/**/inputs/
+plugins/**/fixtures/
+plugins/**/upstream/
+plugins/**/nltk-source/
+plugins/**/downloads/
+plugins/**/nltk_data/
+plugins/**/.state/
+plugins/**/state/
+plugins/**/references/

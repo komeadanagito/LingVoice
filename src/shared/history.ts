@@ -18,6 +18,7 @@ export interface HistoryTask {
   updatedAt: number;
   file: string;
   embed: string;
+  sourceUrl?: string;
   subtitles?: SavedSubtitles;
 }
 

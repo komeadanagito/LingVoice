@@ -14,7 +14,7 @@ export interface DubbingSettings {
 export const defaultDubbingSettings: DubbingSettings = {
   pythonPath: 'python', modelFile: '', baseUrl: '', model: DEFAULT_DUBBING_MODEL,
 };
-export interface DubbingEnvironment { ready: boolean; message: string }
+export interface DubbingEnvironment { ready: boolean; message: string; builtinSeparationReady?: boolean }
 export interface DubbingCue {
   id: number;
   start: number;

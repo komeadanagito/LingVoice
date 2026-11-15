@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { taskQueue, waitForTaskRuntime } from './utils/task-queue';
 import { Sidebar } from './components/Sidebar';
 import { TaskHistory } from './components/TaskHistory';
 import { DownloadCard } from './components/DownloadCard';
@@ -24,6 +25,43 @@ export function App() {
   useRightSidebarAnimation(rightSidebarRef, rightSidebarOpen);
   const [page, setPage] = useState<'download' | 'settings' | 'history'>('download');
   const history = useTaskHistory();
+  const executions = useSyncExternalStore(taskQueue.subscribe, taskQueue.getSnapshot);
+  const [loadedTasks, setLoadedTasks] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (history.activeId) setLoadedTasks(previous => previous.has(history.activeId) ? previous : new Set([...previous, history.activeId]));
+  }, [history.activeId]);
+  const runTasks = (ids: string[]) => {
+    setLoadedTasks(previous => new Set([...previous, ...ids]));
+    for (const id of ids) void taskQueue.enqueue(id, async signal => {
+      let task = await history.prepare(id);
+      signal.throwIfAborted();
+      if (!task.file && task.sourceUrl) {
+        taskQueue.update(id, { stage: 'download', progress: locale === 'zh-CN' ? '正在下载链接视频…' : 'Downloading linked video…' });
+        const cancel = () => { void window.lingvoice.cancel().catch(() => {}); };
+        signal.addEventListener('abort', cancel, { once: true });
+        try {
+          const response = await window.lingvoice.download({ url: task.sourceUrl, height: 'best' });
+          signal.throwIfAborted();
+          if (!response.ok) throw new Error(response.error);
+          history.replaceSource(id, { title: task.title, file: response.data.file, embed: '' }, false);
+          task = await history.prepare(id);
+        } finally { signal.removeEventListener('abort', cancel); }
+      }
+      if (!task.file) throw new Error(locale === 'zh-CN' ? '视频尚未就绪，请先完成下载或导入。' : 'Download or import the video first.');
+      // Let the persistent workspace receive the newly uploaded/downloaded source.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const runtime = await waitForTaskRuntime(id, signal, task.file);
+      await runtime.pipeline(signal);
+    });
+  };
+  const importFiles = (files: File[]) => {
+    for (const file of files) history.create(window.lingvoice.runtime === 'browser'
+      ? { title: file.name, mediaFile: file, file: '', embed: '' }
+      : { title: file.name, file: window.lingvoice.localFilePath(file), embed: '' }, false);
+  };
+  const importLinks = (urls: string[]) => {
+    for (const sourceUrl of urls) history.create({ title: sourceUrl, sourceUrl, file: '', embed: '' }, false);
+  };
   const sourceSignature = useRef('');
   const inspectedTask = useRef('');
   const [subtitleToolsHost, setSubtitleToolsHost] = useState<HTMLDivElement | null>(null);
@@ -115,7 +153,7 @@ export function App() {
         <main>
           <h1 className="sr-only">{t('heading.title')}</h1>
           <section className="settings-page" hidden={page !== 'settings'} aria-labelledby="settings-title">
-            <div className="settings-page-heading"><h2 id="settings-title">{t('nav.settings')}</h2><p>{locale === 'zh-CN' ? '管理通用偏好、Provider 与翻译 / 语音识别' : 'Manage preferences, providers, translation and speech recognition'}</p></div>
+            <div className="settings-page-heading"><h2 id="settings-title">{t('nav.settings')}</h2><p>{locale === 'zh-CN' ? '管理界面语言与本地语音识别、字幕翻译、配音设置' : 'Manage language preferences and local ASR, translation & dubbing settings'}</p></div>
             <div className="card settings-language-card settings-section">
               <div className="settings-section-heading"><h3>{locale === 'zh-CN' ? '通用' : 'General'}</h3></div>
               <LanguageSwitcher {...controller} />
@@ -124,25 +162,28 @@ export function App() {
           </section>
 
           <section className="history-page" hidden={page !== 'history'} aria-labelledby="task-history-heading">
-            <TaskHistory tasks={history.tasks} activeTaskId={history.activeId} ready={history.ready} onOpenTask={openTask} onDeleteTask={history.remove} onNewTask={newTask} />
+            <TaskHistory tasks={history.tasks} activeTaskId={history.activeId} ready={history.ready} onOpenTask={openTask} onDeleteTask={id => { if (!['running', 'queued'].includes(executions[id]?.state)) history.remove(id); }} onNewTask={newTask} onImportFiles={importFiles} onImportLinks={importLinks} onRunTasks={runTasks} onCancelTask={id => taskQueue.cancel(id)} executions={executions} />
           </section>
 
           <div className="main-content" hidden={page !== 'download'}>
-            {history.ready && <VideoPlayer
-              key={`${history.activeId || 'new-task'}:${history.activeTask?.file || history.activeTask?.embed || ''}`}
-              taskId={history.activeId}
-              mediaFile={history.activeTask?.mediaFile}
-              savedSubtitles={history.activeTask?.subtitles}
+            {history.ready && history.tasks.filter(task => loadedTasks.has(task.id) || task.id === history.activeId).map(task => <VideoPlayer
+              key={task.id}
+              active={task.id === history.activeId && page === 'download'}
+              taskId={task.id}
+              mediaFile={task.mediaFile}
+              savedSubtitles={task.subtitles}
               onSaveSubtitles={history.update}
               onOpenFile={openLocalVideo}
               onOpenRecent={openVideo}
-              subtitleToolsHost={subtitleToolsHost}
-              initialFile={history.activeTask?.file || ''}
-              initialEmbed={history.activeTask?.embed || ''}
-              initialTitle={history.activeTask?.title || ''}
+              subtitleToolsHost={task.id === history.activeId && page === 'download' ? subtitleToolsHost : null}
+              initialFile={task.file || ''}
+              initialEmbed={task.embed || ''}
+              initialTitle={task.title || ''}
               recentDownloadedFile={controller.lastDownloadedFile}
               recentDownloadedTitle={videoTitle}
-            />}
+            />)}
+            {history.ready && !history.activeId && <VideoPlayer key="new-task" onOpenFile={openLocalVideo} onOpenRecent={openVideo}
+              subtitleToolsHost={page === 'download' ? subtitleToolsHost : null} recentDownloadedFile={controller.lastDownloadedFile} recentDownloadedTitle={videoTitle} />}
 
             <DownloadCard
               {...controller}

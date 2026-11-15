@@ -91,3 +91,85 @@ export async function separateAudio(inputPath: string, outputDirectory: string, 
     return { dialoguePath: path.join(outputDirectory, 'dialogue.wav'), backgroundPath: path.join(outputDirectory, 'background.wav'), duration: source.duration };
   } finally { await fs.rm(stage, { recursive: true, force: true }); }
 }
+
+export interface RoformerSeparationOptions extends AudioOptions {
+  pythonPath: string;
+  helperPath: string;
+  modelPath: string;
+  configPath: string;
+  uvr5Dir: string;
+  pluginsDir: string;
+  device?: 'cpu' | 'auto' | 'cuda';
+}
+
+/** Separates lead speech from backing vocals + instrumental BGM using local BS-RoFormer / Mel-Band RoFormer. */
+export async function separateAudioRoformer(
+  inputPath: string,
+  outputDirectory: string,
+  options: RoformerSeparationOptions,
+): Promise<{ dialoguePath: string; backgroundPath: string; duration: number }> {
+  if (!path.isAbsolute(outputDirectory) || /[\x00-\x1f]/.test(outputDirectory)) throw new Error('Separation output must be an absolute local directory path.');
+  const input = await localFile(inputPath), source = await readWavInfo(input);
+  const helper = await localFile(options.helperPath);
+  const model = await localFile(options.modelPath);
+  const config = await localFile(options.configPath);
+  checkCancelled(options.signal);
+  try { await fs.lstat(outputDirectory); throw new Error('Separation output directory already exists.'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  await fs.mkdir(path.dirname(outputDirectory), { recursive: true });
+  const stage = await fs.mkdtemp(path.join(path.dirname(outputDirectory), '.roformer-stage-'));
+  try {
+    const raw = path.join(stage, 'raw');
+    await fs.mkdir(raw);
+    const requestPath = path.join(raw, 'request.json');
+    await fs.writeFile(requestPath, JSON.stringify({
+      inputPath: input,
+      outputDir: raw,
+      modelPath: model,
+      configPath: config,
+      uvr5Dir: options.uvr5Dir,
+      pluginsDir: options.pluginsDir,
+      device: options.device ?? 'auto',
+    }));
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PYTHONNOUSERSITE: '1',
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      HF_HUB_OFFLINE: '1',
+      TRANSFORMERS_OFFLINE: '1',
+      HF_HUB_DISABLE_TELEMETRY: '1',
+    };
+    delete env.PYTHONPATH;
+    delete env.PYTHONHOME;
+    delete env.VIRTUAL_ENV;
+    const result = await runAudioProcess(options.pythonPath, ['-s', helper, '--request', requestPath], {
+      ...options,
+      timeoutMs: options.timeoutMs ?? 2 * 60 * 60_000,
+      env,
+      cwd: raw,
+    });
+    let parsed: unknown;
+    try { parsed = JSON.parse(result.stdout); } catch { throw new Error('RoFormer separation helper returned invalid JSON.'); }
+    if (!parsed || typeof parsed !== 'object') throw new Error('Invalid RoFormer separation response.');
+    const value = parsed as PythonResult;
+    if (!value.ok) throw new Error(value.diagnostics.join('\n') || 'Local RoFormer separation failed.');
+    const validateStem = async (file: unknown) => {
+      if (typeof file !== 'string') throw new Error('Missing RoFormer stem path.');
+      const resolved = await localFile(file), relative = path.relative(await fs.realpath(raw), resolved);
+      if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) throw new Error('RoFormer helper returned a path outside its staging directory.');
+      assertDuration((await readWavInfo(resolved)).duration, source.duration);
+      return resolved;
+    };
+    const dialogue = await validateStem(value.dialoguePath), background = await validateStem(value.backgroundPath);
+    if (dialogue === background) throw new Error('RoFormer separation returned the same file for both stems.');
+    const dialogueInfo = await extractAudio(dialogue, path.join(stage, 'dialogue.wav'), options);
+    const backgroundInfo = await extractAudio(background, path.join(stage, 'background.wav'), options);
+    assertDuration(dialogueInfo.duration, source.duration);
+    assertDuration(backgroundInfo.duration, source.duration);
+    await fs.rm(raw, { recursive: true, force: true });
+    checkCancelled(options.signal);
+    await fs.rename(stage, outputDirectory);
+    return { dialoguePath: path.join(outputDirectory, 'dialogue.wav'), backgroundPath: path.join(outputDirectory, 'background.wav'), duration: source.duration };
+  } finally { await fs.rm(stage, { recursive: true, force: true }).catch(() => {}); }
+}

@@ -163,25 +163,54 @@ export async function extractVoiceReference(dialoguePath: string, outputPath: st
   });
 }
 
-/** Built-in FFmpeg DSP Mid-Side + Spectral vocal/BGM separation fallback when local Python UVR is not configured. */
+/** Extracts a 3–10s mono 24 kHz WAV reference tailored for local GPT-SoVITS V5 with optional trailing silence padding
+ * so the final syllable is never clipped and prompt_semantic ends cleanly at a pause.
+ */
+export async function extractLocalVoiceReference(
+  dialoguePath: string,
+  outputPath: string,
+  start: number,
+  duration: number,
+  trailingSilenceSec: number,
+  options: AudioOptions & { denoise?: boolean },
+): Promise<WavInfo> {
+  finiteSeconds(start, 'reference start', true);
+  if (!Number.isFinite(duration) || duration < 2.5 || duration > 9.5) throw new Error('Local voice reference must be 2.5–9.5 seconds.');
+  const padSec = Math.max(0, Math.min(1.0, Number.isFinite(trailingSilenceSec) ? trailingSilenceSec : 0));
+  const input = await localFile(dialoguePath), source = await readWavInfo(input);
+  if (start + duration > source.duration + 1 / source.sampleRate) throw new Error('Voice reference extends beyond dialogue audio.');
+  const expected = Math.min(9.9, Math.max(3.1, duration + padSec));
+  const exactPad = Math.max(0, expected - duration);
+  const denoiseFilter = options.denoise ? ',highpass=f=85,afftdn=nr=16:nf=-28:tn=1' : '';
+  return atomicAudioFile(outputPath, options.signal, async temporary => {
+    const args = [
+      ...ffmpegBase, '-i', input, '-vn',
+      '-af', `atrim=start=${start}:duration=${duration},asetpts=PTS-STARTPTS${denoiseFilter},apad=pad_dur=${exactPad.toFixed(4)}`,
+      '-t', String(expected),
+      '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', temporary,
+    ];
+    await runAudioProcess(options.ffmpegPath, args, options);
+    const info = await readWavInfo(temporary);
+    assertDuration(info.duration, expected, 0.02);
+    return info;
+  });
+}
+
+/** Safe fallback without a real separation model: retain source audio for reference and mute the background.
+ * Stereo cancellation and frequency filters cannot reliably remove speech; music is intentionally not preserved.
+ */
 export async function separateAudioFfmpegFallback(inputPath: string, outputDirectory: string, options: AudioOptions): Promise<{ dialoguePath: string; backgroundPath: string; duration: number }> {
   if (!path.isAbsolute(outputDirectory) || /[\x00-\x1f]/.test(outputDirectory)) throw new Error('Separation output must be an absolute local directory path.');
   const input = await localFile(inputPath), source = await readWavInfo(input);
   checkCancelled(options.signal);
   await fs.mkdir(path.dirname(outputDirectory), { recursive: true });
-  const stage = await fs.mkdtemp(path.join(path.dirname(outputDirectory), '.dsp-separation-stage-'));
+  const stage = await fs.mkdtemp(path.join(path.dirname(outputDirectory), '.silent-separation-stage-'));
   try {
     const dialogueOut = path.join(stage, 'dialogue.wav');
     const backgroundOut = path.join(stage, 'background.wav');
-    // Single-pass lightweight Mid-Side separation: decodes source once and writes both stems simultaneously.
-    const dualStemFilter =
-      '[0:a]asplit=2[in_v][in_b];' +
-      '[in_v]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=85,lowpass=f=3800[v_out];' +
-      '[in_b]asplit=3[side_in][low_in][high_in];' +
-      '[side_in]pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0[side];' +
-      '[low_in]lowpass=f=110,volume=0.85[low];' +
-      '[high_in]highpass=f=4200,volume=0.75[high];' +
-      '[side][low][high]amix=inputs=3:duration=longest:dropout_transition=0:normalize=0[bg_out]';
+    // Decode once, retaining the complete source as the reference (not isolated vocals).
+    // Exact silence prevents off-centre, reverberant and high-frequency speech leaking into the dub.
+    const dualStemFilter = '[0:a]asplit=2[v_out][in_b];[in_b]volume=0[bg_out]';
     await runAudioProcess(
       options.ffmpegPath,
       [
@@ -201,5 +230,103 @@ export async function separateAudioFfmpegFallback(inputPath: string, outputDirec
     return { dialoguePath: path.join(outputDirectory, 'dialogue.wav'), backgroundPath: path.join(outputDirectory, 'background.wav'), duration: source.duration };
   } finally {
     await fs.rm(stage, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Restores the original audio mix (including solo singing BGM) during non-dialogue gaps
+ * while keeping the separated instrumental/backing stem everywhere the narrator speaks.
+ */
+export async function buildSmartBackground(
+  sourceWavPath: string,
+  separatedBgPath: string,
+  outputPath: string,
+  cues: readonly { start: number; end: number }[],
+  offset: number,
+  duration: number,
+): Promise<string> {
+  try {
+    const [srcInfo, bgInfo] = await Promise.all([readWavInfo(sourceWavPath), readWavInfo(separatedBgPath)]);
+    if (
+      srcInfo.bitsPerSample !== 16 || bgInfo.bitsPerSample !== 16 ||
+      srcInfo.sampleRate !== bgInfo.sampleRate || srcInfo.channels !== bgInfo.channels ||
+      srcInfo.frames !== bgInfo.frames
+    ) {
+      return separatedBgPath;
+    }
+    const [srcBuf, bgBuf] = await Promise.all([fs.readFile(sourceWavPath), fs.readFile(separatedBgPath)]);
+    if (
+      srcBuf.byteLength < 44 || bgBuf.byteLength < 44 ||
+      srcBuf.toString('ascii', 36, 40) !== 'data' || bgBuf.toString('ascii', 36, 40) !== 'data'
+    ) {
+      return separatedBgPath;
+    }
+    const sr = bgInfo.sampleRate;
+    const ch = bgInfo.channels;
+    const totalFrames = bgInfo.frames;
+    const speechPad = 0.25;
+    const rawWindows = cues
+      .map(c => ({ start: Math.max(0, c.start + offset - speechPad), end: Math.min(duration, c.end + offset + speechPad) }))
+      .filter(w => w.end > w.start)
+      .sort((a, b) => a.start - b.start);
+    const merged: { start: number; end: number }[] = [];
+    for (const w of rawWindows) {
+      const prev = merged.at(-1);
+      if (prev && w.start - prev.end < 0.75) {
+        prev.end = Math.max(prev.end, w.end);
+      } else {
+        merged.push({ ...w });
+      }
+    }
+    // Identify non-dialogue gaps >= 0.5s where original audio (including singing BGM) is safe to restore.
+    const gaps: { startFrame: number; endFrame: number }[] = [];
+    let cursor = 0;
+    for (const w of merged) {
+      if (w.start - cursor >= 0.5) {
+        gaps.push({
+          startFrame: Math.max(0, Math.round(cursor * sr)),
+          endFrame: Math.min(totalFrames, Math.round(w.start * sr)),
+        });
+      }
+      cursor = Math.max(cursor, w.end);
+    }
+    if (duration - cursor >= 0.5) {
+      gaps.push({
+        startFrame: Math.max(0, Math.round(cursor * sr)),
+        endFrame: totalFrames,
+      });
+    }
+    if (!gaps.length) return separatedBgPath;
+
+    const outBuf = Buffer.from(bgBuf);
+    const srcView = new DataView(srcBuf.buffer, srcBuf.byteOffset + 44, totalFrames * ch * 2);
+    const outView = new DataView(outBuf.buffer, outBuf.byteOffset + 44, totalFrames * ch * 2);
+    const fadeFrames = Math.min(Math.round(0.15 * sr), Math.round(0.25 * sr));
+
+    for (const gap of gaps) {
+      const len = gap.endFrame - gap.startFrame;
+      if (len <= 0) continue;
+      const localFade = Math.min(fadeFrames, Math.floor(len / 3));
+      for (let f = gap.startFrame; f < gap.endFrame; f++) {
+        let mixOrig = 1.0;
+        const fromStart = f - gap.startFrame;
+        const toEnd = gap.endFrame - 1 - f;
+        if (localFade > 0) {
+          if (fromStart < localFade) mixOrig = 0.5 * (1 - Math.cos((Math.PI * fromStart) / localFade));
+          else if (toEnd < localFade) mixOrig = 0.5 * (1 - Math.cos((Math.PI * toEnd) / localFade));
+        }
+        const mixBg = 1.0 - mixOrig;
+        for (let c = 0; c < ch; c++) {
+          const byteIdx = (f * ch + c) * 2;
+          const sOrig = srcView.getInt16(byteIdx, true);
+          const sBg = outView.getInt16(byteIdx, true);
+          const blended = Math.max(-32768, Math.min(32767, Math.round(sOrig * mixOrig + sBg * mixBg)));
+          outView.setInt16(byteIdx, blended, true);
+        }
+      }
+    }
+    await fs.writeFile(outputPath, outBuf, { mode: 0o600 });
+    return outputPath;
+  } catch {
+    return separatedBgPath;
   }
 }

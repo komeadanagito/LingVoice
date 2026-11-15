@@ -45,28 +45,28 @@ export function useTaskHistory() {
     enqueue(() => selectTask(id));
   }, [enqueue]);
 
-  const create = useCallback((source: Pick<HistoryTask, 'title' | 'file' | 'embed' | 'mediaFile'>) => {
+  const create = useCallback((source: Pick<HistoryTask, 'title' | 'file' | 'embed' | 'mediaFile' | 'sourceUrl'>, activate = true) => {
     const now = Date.now();
     const task: HistoryTask = { ...source, id: crypto.randomUUID(), createdAt: now, updatedAt: now };
     records.current = [task, ...records.current];
     setTasks(records.current);
-    setActiveId(task.id);
+    if (activate) setActiveId(task.id);
     setError('');
     enqueue(async () => {
       await saveTask(task);
-      await selectTask(task.id);
+      if (activate) await selectTask(task.id);
     });
     return task.id;
   }, [enqueue, select]);
 
-  const replaceSource = useCallback((id: string, source: Pick<HistoryTask, 'title' | 'file' | 'embed'>) => {
+  const replaceSource = useCallback((id: string, source: Pick<HistoryTask, 'title' | 'file' | 'embed'>, activate = true) => {
     const existing = records.current.find(task => task.id === id);
     if (!existing || removing.current.has(id)) return false;
     const task: HistoryTask = { ...existing, ...source, updatedAt: Date.now() };
     records.current = records.current.map(record => record.id === id ? task : record);
     setTasks(records.current);
-    setActiveId(id);
-    enqueue(async () => { await saveTask(task); await selectTask(id); });
+    if (activate) setActiveId(id);
+    enqueue(async () => { await saveTask(task); if (activate) await selectTask(id); });
     return true;
   }, [enqueue, select]);
 
@@ -102,5 +102,23 @@ export function useTaskHistory() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [saving]);
 
-  return { tasks, activeId, activeTask: tasks.find(task => task.id === activeId), ready, saving, error, create, replaceSource, select, update, remove };
+  const prepare = useCallback(async (id: string) => {
+    await queue.current;
+    const state = await window.lingvoice.history();
+    if (!state.ok) throw new Error(state.error);
+    const stored = state.data.tasks.find(task => task.id === id);
+    const current = records.current.find(task => task.id === id);
+    if (!stored || !current) throw new Error('Task has not been saved. Retry after resolving the storage error.');
+    // An uploaded browser file now has a durable backend handle. Keep current
+    // subtitle state; only replace the transient media source.
+    if (current.mediaFile && stored.file) {
+      const next = { ...current, file: stored.file, mediaFile: undefined };
+      records.current = records.current.map(task => task.id === id ? next : task);
+      setTasks(records.current);
+      return next;
+    }
+    return current;
+  }, []);
+  const getTask = useCallback((id: string) => records.current.find(task => task.id === id), []);
+  return { tasks, activeId, activeTask: tasks.find(task => task.id === activeId), ready, saving, error, create, replaceSource, select, update, remove, prepare, getTask };
 }

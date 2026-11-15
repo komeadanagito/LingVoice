@@ -1,8 +1,10 @@
 import { DEFAULT_DUBBING_MODEL } from './dubbing';
+import type { InferenceMode } from './local-models';
 
 export const DEFAULT_TTS_BASE_URL = 'https://dashscope.aliyuncs.com/api/v1';
 
 export interface TtsSettings {
+  mode?: InferenceMode;
   providerId: string;
   baseUrl: string;
   model: string;
@@ -24,4 +26,4 @@ export interface TtsConfigUpdate {
   apiKey?: string;
 }
 export interface TtsRequest { text: string }
-export interface TtsAudio { mimeType: 'audio/mpeg'; audioBase64: string; fileName: string }
+export interface TtsAudio { mimeType: 'audio/mpeg' | 'audio/wav'; audioBase64: string; fileName: string }

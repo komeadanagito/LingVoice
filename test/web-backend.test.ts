@@ -594,8 +594,12 @@ test('Web issued download and dubbing media URLs survive restart and reject stal
   await fs.rm(output.video);
   assert.equal((await fetch(dubbed.video)).status, 404);
   await fs.rm(output.audio);
-  await fs.symlink(output.subtitles, output.audio);
-  assert.equal((await fetch(dubbed.audio)).status, 404, 'a symlink replacement cannot expose another local file');
+  try {
+    await fs.symlink(output.subtitles, output.audio);
+    assert.equal((await fetch(dubbed.audio)).status, 404, 'a symlink replacement cannot expose another local file');
+  } catch (error) {
+    if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+  }
   const subtitleToken = new URL(dubbed.subtitles).pathname.split('/').pop()!;
   await fs.writeFile(path.join(handleDir, subtitleToken), '{broken');
   assert.equal((await fetch(dubbed.subtitles)).status, 404, 'corrupt persisted records fail safely');

@@ -225,10 +225,10 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
             : `${sec.toFixed(1)}s (~${Math.max(1, Math.round(sec * 2.6))} words / ~${Math.max(2, Math.round(sec * 3.8))} syllables)`,
         );
         const styleRule = isChineseTarget
-          ? 'Use natural conversational Chinese creator phrasing and preserve emotional energy.'
-          : 'Use natural conversational spoken English with contractions (e.g. it\'s, we\'re, don\'t, that\'s), preserve the speaker\'s emotional cadence, and keep clause order smooth across adjacent lines.';
+          ? 'Use natural, punchy conversational Chinese creator phrasing (口语化表达，避免生硬翻译腔) and preserve emotional energy.'
+          : 'Use natural, idiomatic spoken English with contractions (it\'s, we\'re, don\'t, I\'m, can\'t), adapt slang and cultural/gaming terms naturally instead of literal word-for-word phrasing, preserve the speaker\'s emotional cadence, and keep clause grammar continuous across adjacent lines.';
         const dubbingHint = input.dubbingDurations
-          ? ` This is isochronous spoken video dubbing: ${styleRule} Input lines come from ASR and may contain homophone typos or background-music lyric fragments—infer and correct ASR recognition errors from context, ignore non-speech BGM noise, preserve names and core meaning, and strictly fit each line's speaking duration budget: ${JSON.stringify(budgetList)}. Shorten verbose phrasing so the spoken translation matches the original speaker's timing without rushing; do not add commentary.`
+          ? ` This is isochronous spoken video dubbing: ${styleRule} Input lines come from ASR and may contain homophone typos or background-music lyric fragments—infer and correct ASR recognition errors from context, ignore non-speech BGM noise, preserve names and core meaning, avoid leaving untranslated source characters, and strictly fit each line's speaking duration budget: ${JSON.stringify(budgetList)}. Shorten verbose phrasing so the spoken translation matches the original speaker's timing without rushing; do not add commentary.`
           : '';
         const hasWindow = !!(input.context?.length || input.lookahead?.length);
         const windowHint = hasWindow
@@ -525,7 +525,18 @@ export class ProviderService {
     try {
       await fs.mkdir(path.dirname(this.file), { recursive: true });
       await fs.writeFile(temporary, JSON.stringify({ providers }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      await fs.rename(temporary, this.file);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await fs.rename(temporary, this.file);
+          break;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          const retryable = process.platform === 'win32' && (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES');
+          if (!retryable || attempt >= 4) throw error;
+          if ((await fs.stat(this.file).catch(() => undefined))?.isDirectory()) throw error;
+          await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)));
+        }
+      }
     } catch {
       await fs.rm(temporary, { force: true }).catch(() => {});
       throw new Error('Unable to save provider configuration.');

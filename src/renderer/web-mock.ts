@@ -31,6 +31,30 @@ export function installWebMock(): void {
   let localMedia: { reference: string; file: File } | undefined;
   let asrController: AbortController | undefined;
   let dubbingTask: { jobId: string; controller: AbortController } | undefined;
+  // Share one EventSource per origin so background task workspaces never exhaust HTTP/1.1's 6-socket pool.
+  let events: EventSource | undefined;
+  let subscriberCount = 0;
+  function subscribeEvent(type: string, callback: (data: unknown) => void): () => void {
+    if (!events) events = new EventSource('/api/lingvoice/events');
+    const source = events;
+    subscriberCount++;
+    const listener = (event: Event) => {
+      try { callback(JSON.parse((event as MessageEvent<string>).data)); } catch { /* Ignore incomplete events. */ }
+    };
+    source.addEventListener(type, listener);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      source.removeEventListener(type, listener);
+      subscriberCount--;
+      if (subscriberCount <= 0 && events === source) {
+        events.close();
+        events = undefined;
+        subscriberCount = 0;
+      }
+    };
+  }
   const api: LingVoiceApi = {
     dubbingConfig: () => request('dubbing-config'),
     saveDubbingConfig: settings => request('dubbing-save', settings),
@@ -67,13 +91,7 @@ export function installWebMock(): void {
       if (dubbingTask?.jobId === jobId) dubbingTask.controller.abort();
       return request('dubbing-cancel', { jobId });
     },
-    onDubbingProgress: callback => {
-      const events = new EventSource('/api/lingvoice/events');
-      events.addEventListener('dubbing-progress', event => {
-        try { callback(JSON.parse((event as MessageEvent<string>).data)); } catch { /* Ignore incomplete events. */ }
-      });
-      return () => events.close();
-    },
+    onDubbingProgress: callback => subscribeEvent('dubbing-progress', data => callback(data as Parameters<typeof callback>[0])),
     runtime: 'browser',
     history: () => request('history'),
     saveHistoryTask: task => request('history-save', task),
@@ -124,14 +142,13 @@ export function installWebMock(): void {
       asrController?.abort();
       return request('asr-cancel');
     },
+    localModelsStatus: () => request('local-models-status'),
+    stopLocalModels: id => request('local-models-stop', id ? { id } : {}),
+    downloadLocalModels: payload => request('local-models-download', payload),
+    cancelLocalModelsDownload: () => request('local-models-cancel-download'),
+    onLocalModelsDownloadProgress: callback => subscribeEvent('local-models-download-progress', data => callback(data as Parameters<typeof callback>[0])),
     testAsr: () => request('asr-test'),
-    onAsrProgress: callback => {
-      const events = new EventSource('/api/lingvoice/events');
-      events.addEventListener('asr-progress', event => {
-        try { callback(JSON.parse((event as MessageEvent<string>).data)); } catch { /* Ignore incomplete events. */ }
-      });
-      return () => events.close();
-    },
+    onAsrProgress: callback => subscribeEvent('asr-progress', data => callback(data as Parameters<typeof callback>[0])),
     translationConfig: () => request('translation-config'),
     saveTranslationConfig: update => request('translation-save', update),
     translationModels: () => request('translation-models'),
@@ -167,13 +184,7 @@ export function installWebMock(): void {
     openFolder: () => request('open-folder'),
     chooseCookies: () => request('choose-cookies'),
     clearCookies: () => request('clear-cookies'),
-    onEvent: callback => {
-      const events = new EventSource('/api/lingvoice/events');
-      events.onmessage = event => {
-        try { callback(JSON.parse(event.data) as DownloadEvent); } catch { /* Ignore incomplete events. */ }
-      };
-      return () => events.close();
-    },
+    onEvent: callback => subscribeEvent('message', data => callback(data as DownloadEvent)),
   };
   window.lingvoice = api;
 }

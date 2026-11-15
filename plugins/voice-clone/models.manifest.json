@@ -1,0 +1,107 @@
+{
+  "source_repo": "https://github.com/RVC-Boss/GPT-SoVITS",
+  "source_revision": "e91506f1fba265e1841617c3042a1573206a7351",
+  "source_branch": "cuda_graph_accel_v5",
+  "default_variant": "v5turbo",
+  "assets": [
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-hubert-base/config.json",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-hubert-base/config.json",
+      "bytes": 1449,
+      "sha256": null,
+      "git_blob_sha1": "0bb839d4b0cd2ad41cb13c6500fd660800aaefdf"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-hubert-base/preprocessor_config.json",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-hubert-base/preprocessor_config.json",
+      "bytes": 212,
+      "sha256": null,
+      "git_blob_sha1": "409547bbb99588f69a603019a707505610fa38d3"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-hubert-base/pytorch_model.bin",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-hubert-base/pytorch_model.bin",
+      "bytes": 188811417,
+      "sha256": "24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c",
+      "git_blob_sha1": "a73dedefbc10383bc70e289fe0897d2157c6f66b"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-roberta-wwm-ext-large/config.json",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large/config.json",
+      "bytes": 963,
+      "sha256": null,
+      "git_blob_sha1": "3ae58d7f0734373bb28d3b6b9d6858b34f600b4a"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-roberta-wwm-ext-large/pytorch_model.bin",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large/pytorch_model.bin",
+      "bytes": 651225145,
+      "sha256": "e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8",
+      "git_blob_sha1": "9d67762821a81a27af2c60d8094ad86cad6510c3"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "chinese-roberta-wwm-ext-large/tokenizer.json",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large/tokenizer.json",
+      "bytes": 268962,
+      "sha256": null,
+      "git_blob_sha1": "9e77beb20869ea3b7850166fbc8cc7734662a017"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "gsv-v5-pretrained/s2Gv5dev.pth",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/gsv-v5-pretrained/s2Gv5dev.pth",
+      "bytes": 766385517,
+      "sha256": "16c11fc588a9229a479316a11fc0f518087e79773f5271666a90b39d50460407",
+      "git_blob_sha1": "d8b219974df8b0e2268ae3c79ca6a6858eb555b8"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "gsv-v5-pretrained/s2Gv5turbo.pth",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/gsv-v5-pretrained/s2Gv5turbo.pth",
+      "bytes": 766406144,
+      "sha256": "287b32a06b7d486f5303ec520468b0728fb01aac8b0f5d86fd5455c9a1d3e022",
+      "git_blob_sha1": "9f90a40ffbb5a9e4dae0d71cfc32d0ef4c4d82ae"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "gsv-v5-pretrained/vocoder.pth",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/gsv-v5-pretrained/vocoder.pth",
+      "bytes": 57761163,
+      "sha256": "b7543c83222aa2105bb4efb56845086bc5f2eeba61243d723ffa062052b3221f",
+      "git_blob_sha1": "b26a0072da55a23794ed688c42b02624547bd718"
+    },
+    {
+      "repo": "lj1995/GPT-SoVITS",
+      "revision": "8f8857563c040d542de108a2c18b0425abd6c9c5",
+      "source": "s1v3.ckpt",
+      "destination": "upstream/GPT_SoVITS/pretrained_models/s1v3.ckpt",
+      "bytes": 155284856,
+      "sha256": "87133414860ea14ff6620c483a3db5ed07b44be42e2c3fcdad65523a729a745a",
+      "git_blob_sha1": "54a87a3557ca48356e31cf3651155a6dbb8a05da"
+    },
+    {
+      "repo": "XXXXRT/GPT-SoVITS-Pretrained",
+      "revision": "0c47645e02a7bc3688d7b263b0042c81e3cd82cd",
+      "source": "G2PWModel.zip",
+      "destination": "downloads/G2PWModel.zip",
+      "bytes": 588856634,
+      "sha256": "46292be0374a49308069233cd5c147ae4c41806558e4781a2467a31a4d8099da",
+      "git_blob_sha1": "cfab842ae2d9907dcdb230aa726bf0762b9c4edc"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+.venv/
+cache/
+tmp/
+downloads/
+state/
+outputs/
+references/*
+!references/.gitkeep
+upstream/
+nltk-source/
+__pycache__/
+*.pyc
+*.wav
+*.smoke.json
+models.verified.json
+runtime.manifest.json
+repair-plan.json

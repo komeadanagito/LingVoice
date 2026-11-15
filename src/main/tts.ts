@@ -3,11 +3,13 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createDefaultProviderRegistry, type ProviderService } from './providers';
 import { DEFAULT_TTS_BASE_URL, defaultTtsSettings, type TtsSettings, type TtsConfig, type TtsConfigUpdate, type TtsRequest, type TtsAudio } from '../shared/tts';
+import type { InferenceMode } from '../shared/local-models';
+import type { LocalPluginManager } from './local-plugins';
 
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const TIMEOUT_MS = 120_000;
 const fallbackTts = createDefaultProviderRegistry().get('openai-compatible').tts!;
-const SETTINGS_KEYS = ['providerId', 'model', 'voice', 'speed', 'fullUrl', 'baseUrl'] as const;
+const SETTINGS_KEYS = ['providerId', 'model', 'voice', 'speed', 'fullUrl', 'baseUrl', 'mode'] as const;
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -47,15 +49,26 @@ function settings(value: unknown): TtsSettings {
   if (!record(value) || typeof value.fullUrl !== 'boolean' ||
     !['providerId', 'model', 'voice', 'speed', 'fullUrl'].every(key => Object.hasOwn(value, key)) ||
     Object.keys(value).some(key => !SETTINGS_KEYS.includes(key as typeof SETTINGS_KEYS[number])) ||
+    (value.mode !== undefined && value.mode !== 'cloud' && value.mode !== 'local') ||
     !metadata(value.providerId, true) || (value.providerId !== '' && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value.providerId)) ||
     !metadata(value.model) || !metadata(value.voice) || typeof value.speed !== 'number' ||
     !Number.isFinite(value.speed) || value.speed < 0.25 || value.speed > 4) {
     throw new Error('Invalid speech settings. Speed must be between 0.25 and 4.');
   }
   return {
+    ...(value.mode === 'local' ? { mode: 'local' as const } : {}),
     providerId: value.providerId, baseUrl: apiUrl(value.baseUrl ?? '', true),
     model: value.model.trim(), voice: value.voice.trim(), speed: value.speed, fullUrl: value.fullUrl,
   };
+}
+
+class LocalTtsError extends Error {}
+
+function guessV5Lang(input: string): 'zh' | 'en' | 'ja' | 'ko' {
+  if (/[\u3040-\u30ff]/.test(input)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(input)) return 'ko';
+  if (/[\u4e00-\u9fff]/.test(input)) return 'zh';
+  return 'en';
 }
 
 interface Vault { encrypt(value: string): string; decrypt(value: string): string }
@@ -71,7 +84,12 @@ export class TtsService {
   private active?: AbortController;
   private dubbingActive = false;
 
-  constructor(private readonly file: string, private readonly providers: ProviderService, private readonly vault?: Vault) {}
+  constructor(
+    private readonly file: string,
+    private readonly providers: ProviderService,
+    private readonly vault?: Vault,
+    private readonly localPlugins?: LocalPluginManager,
+  ) {}
   get busy(): boolean { return this.active !== undefined || this.dubbingActive; }
   cancel(): void { this.active?.abort(); }
 
@@ -110,18 +128,28 @@ export class TtsService {
     } finally { this.dubbingActive = false; }
   }
 
-  async dubbingContextInfo(): Promise<{ providerName: string; baseUrl: string; hasApiKey: boolean; model?: string }> {
+  async dubbingContextInfo(): Promise<{ providerName: string; baseUrl: string; hasApiKey: boolean; model?: string; mode?: InferenceMode }> {
     try {
       const state = await this.load();
+      if (state.settings.mode === 'local') {
+        return {
+          providerName: 'Local GPT-SoVITS V5',
+          baseUrl: 'http://127.0.0.1:9873',
+          hasApiKey: true,
+          model: state.settings.model,
+          mode: 'local',
+        };
+      }
       const access = await this.resolveAccess(state);
       return {
         providerName: access.providerName,
         baseUrl: alibabaApiRoot(access.baseUrl) || alibabaApiRoot(DEFAULT_TTS_BASE_URL) || DEFAULT_TTS_BASE_URL,
         hasApiKey: !!access.apiKey,
         model: state.settings.model,
+        mode: 'cloud',
       };
     } catch {
-      return { providerName: '', baseUrl: DEFAULT_TTS_BASE_URL, hasApiKey: false };
+      return { providerName: '', baseUrl: DEFAULT_TTS_BASE_URL, hasApiKey: false, mode: 'cloud' };
     }
   }
 
@@ -202,6 +230,45 @@ export class TtsService {
         const state = await this.load();
         const config = state.settings;
         controller.signal.throwIfAborted();
+        if (config.mode === 'local') {
+          if (!this.localPlugins) throw new LocalTtsError('当前后端未启用本地模型插件管理器。 / Local plugin manager is unavailable.');
+          try {
+            await this.localPlugins.ensureRunning('voice-clone', controller.signal);
+          } catch (err) {
+            throw new LocalTtsError(err instanceof Error ? err.message : String(err));
+          }
+          const refsDir = this.localPlugins.referencesDir();
+          let refFile = '';
+          try {
+            const entries = await fs.readdir(refsDir);
+            refFile = entries.find(name => name.toLowerCase().endsWith('.wav') && !name.startsWith('lingvoice-')) ?? '';
+          } catch {}
+          if (!refFile) {
+            throw new LocalTtsError('本地声音克隆服务 (GPT-SoVITS V5) 启动并健康检查通过！但单独测试合成需要在 plugins/voice-clone/references/ 放置一段 3–10 秒单声道 WAV 参考音频（视频配音时会自动从视频提取）。');
+          }
+          let promptText = '';
+          try {
+            const txtPath = path.join(refsDir, refFile.replace(/\.wav$/i, '.txt'));
+            promptText = (await fs.readFile(txtPath, 'utf8')).trim().slice(0, 500);
+          } catch {}
+          if (!promptText) promptText = '这是一段用于音色参考的测试语音。';
+          const clippedText = inputText.trim().slice(0, 500);
+          try {
+            const wav = await this.localPlugins.requestAudio('voice-clone', '/tts', {
+              text: clippedText,
+              text_lang: guessV5Lang(clippedText),
+              ref_audio_path: refFile,
+              prompt_text: promptText,
+              prompt_lang: guessV5Lang(promptText),
+              consent: true,
+              speed_factor: Math.min(1.25, Math.max(0.75, config.speed || 1)),
+              seed: 42,
+            }, controller.signal);
+            return { mimeType: 'audio/wav', audioBase64: wav.toString('base64'), fileName: 'speech.wav' };
+          } catch (err) {
+            throw new LocalTtsError(err instanceof Error ? err.message : String(err));
+          }
+        }
         let access: { baseUrl: string; apiKey: string; tts: NonNullable<typeof fallbackTts> };
         try { access = await this.resolveAccess(state); }
         catch (error) {
@@ -280,8 +347,9 @@ export class TtsService {
         if (!bytes) throw new Error();
         return { mimeType: 'audio/mpeg', audioBase64: Buffer.concat(chunks, bytes).toString('base64'), fileName: 'speech.mp3' };
       })()]);
-    } catch {
+    } catch (err) {
       if (controller.signal.aborted) throw new Error(timedOut ? 'Speech generation timed out.' : 'Speech generation cancelled.');
+      if (err instanceof LocalTtsError) throw err;
       throw new Error('Speech generation failed. Check the saved settings, provider configuration and availability.');
     } finally {
       clearTimeout(timer);

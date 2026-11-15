@@ -1,28 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { DEFAULT_DUBBING_MODEL, SUPPORTED_DUBBING_MODELS } from '../../shared/dubbing';
+import { defaultDubbingSettings, type DubbingSettings } from '../../shared/dubbing';
 import { DEFAULT_TTS_BASE_URL, defaultTtsSettings, type TtsSettings } from '../../shared/tts';
 import { useI18n } from '../i18n';
-import { Select } from './Select';
-
-const dubbingModelOptions = SUPPORTED_DUBBING_MODELS.map(value => ({ value, label: value }));
-
-function dubbingModel(model: string): string {
-  return (SUPPORTED_DUBBING_MODELS as readonly string[]).includes(model) ? model : DEFAULT_DUBBING_MODEL;
-}
 
 interface Props {
   disabled: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  builtinSeparationReady?: boolean;
 }
 
-export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse }: Props) {
+export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse, builtinSeparationReady }: Props) {
   const { locale } = useI18n();
   const zh = locale === 'zh-CN';
-  const [settings, setSettings] = useState<TtsSettings>({ ...defaultTtsSettings, baseUrl: DEFAULT_TTS_BASE_URL });
-  const [hasKey, setHasKey] = useState(false);
-  const [key, setKey] = useState('');
-  const [showKey, setShowKey] = useState(false);
+  const [settings, setSettings] = useState<TtsSettings>({ ...defaultTtsSettings, mode: 'local', baseUrl: DEFAULT_TTS_BASE_URL });
+  const [dubbing, setDubbing] = useState<DubbingSettings>({ ...defaultDubbingSettings });
+  const [separationNote, setSeparationNote] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
@@ -34,69 +27,108 @@ export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse 
   const running = useRef(false);
   const live = useRef(false);
 
-  function applySettings(next: TtsSettings) {
-    setSettings({
-      ...next,
-      providerId: '',
-      model: dubbingModel(next.model),
-      baseUrl: next.baseUrl || DEFAULT_TTS_BASE_URL,
-    });
-  }
-
   useEffect(() => {
     live.current = true;
     let active = true;
-    void window.lingvoice.ttsConfig().then(result => {
+    void Promise.all([
+      window.lingvoice.ttsConfig(),
+      window.lingvoice.dubbingConfig?.() ?? Promise.resolve(null),
+      window.lingvoice.checkDubbing?.() ?? Promise.resolve(null),
+    ]).then(([ttsRes, dubRes, checkRes]) => {
       if (!active) return;
-      if (!result.ok) throw new Error(result.error);
-      applySettings(result.data.settings);
-      setHasKey(result.data.hasApiKey);
+      if (!ttsRes.ok) throw new Error(ttsRes.error);
+      setSettings({
+        ...ttsRes.data.settings,
+        mode: 'local',
+        providerId: '',
+        baseUrl: ttsRes.data.settings.baseUrl || DEFAULT_TTS_BASE_URL,
+      });
+      if (dubRes && dubRes.ok) {
+        setDubbing(dubRes.data.settings);
+      }
+      if (checkRes && checkRes.ok) {
+        if (checkRes.data.ready) {
+          setSeparationNote(zh ? '已启用自定义本地人声分离模型。' : 'Custom local separation model is ready.');
+        } else if (checkRes.data.builtinSeparationReady) {
+          setSeparationNote(zh
+            ? '内置 Karaoke BS-RoFormer 已就绪：自动去除原视频说话人声，保留 BGM 与唱歌人声。'
+            : 'Built-in Karaoke BS-RoFormer is ready: removes spoken dialogue while keeping BGM & singing vocals.');
+        } else {
+          setSeparationNote(zh
+            ? '未检测到人声分离模型：配音时将静音原视频背景音以防止原声串音。'
+            : 'No separation model detected: original background audio will be muted.');
+        }
+      }
       setLoaded(true);
-    }).catch(error => { if (active) setFeedback({ error: true, text: String(error instanceof Error ? error.message : error) }); });
+    }).catch(error => {
+      if (active) setFeedback({ error: true, text: String(error instanceof Error ? error.message : error) });
+    });
     return () => {
-      active = false; live.current = false; requestVersion.current++;
+      active = false;
+      live.current = false;
+      requestVersion.current++;
       if (running.current) void window.lingvoice.cancelTts().catch(() => {});
     };
-  }, []);
+  }, [zh]);
+
   useEffect(() => () => { if (audio) URL.revokeObjectURL(audio.url); }, [audio]);
 
   const blocked = disabled || !loaded || saving || generating;
-  const canTest = !!settings.baseUrl.trim() && !!text.trim();
-  const tokenPlan = /^https:\/\/token-plan\.cn-beijing\.maas\.aliyuncs\.com(?:\/|$)/i.test(settings.baseUrl.trim());
+  const canTest = !!text.trim();
 
-  async function save(explicitKey?: string) {
-    const payload = {
-      settings: { ...settings, providerId: '', baseUrl: settings.baseUrl.trim() || DEFAULT_TTS_BASE_URL, model: dubbingModel(settings.model) },
-      ...(explicitKey !== undefined ? { apiKey: explicitKey } : key ? { apiKey: key } : {}),
+  async function saveAll() {
+    const nextSettings: TtsSettings = {
+      ...settings,
+      mode: 'local',
+      providerId: '',
+      baseUrl: settings.baseUrl.trim() || DEFAULT_TTS_BASE_URL,
     };
-    const result = await window.lingvoice.saveTtsConfig(payload);
+    const result = await window.lingvoice.saveTtsConfig({ settings: nextSettings });
     if (!result.ok) throw new Error(result.error);
+    if (typeof window.lingvoice.saveDubbingConfig === 'function') {
+      const dubSave = await window.lingvoice.saveDubbingConfig(dubbing);
+      if (!dubSave.ok) throw new Error(dubSave.error);
+      if (live.current) setDubbing(dubSave.data.settings);
+      if (typeof window.lingvoice.checkDubbing === 'function') {
+        const checked = await window.lingvoice.checkDubbing();
+        if (checked.ok && live.current) {
+          if (checked.data.ready) {
+            setSeparationNote(zh ? '已启用自定义本地人声分离模型。' : 'Custom local separation model is ready.');
+          } else if (checked.data.builtinSeparationReady) {
+            setSeparationNote(zh
+              ? '内置 Karaoke BS-RoFormer 已就绪：自动去除原视频说话人声，保留 BGM 与唱歌人声。'
+              : 'Built-in Karaoke BS-RoFormer is ready: removes spoken dialogue while keeping BGM & singing vocals.');
+          }
+        }
+      }
+    }
     if (live.current) {
-      applySettings(result.data.settings);
-      setHasKey(result.data.hasApiKey);
-      setKey('');
+      setSettings({ ...result.data.settings, mode: 'local', providerId: '' });
+      window.dispatchEvent(new CustomEvent('lingvoice:tts-mode-changed', { detail: { ...result.data.settings, mode: 'local' } }));
     }
   }
+
   async function saveOnly() {
-    setSaving(true); setFeedback(null);
-    try { await save(); if (live.current) setFeedback({ error: false, text: zh ? '语音合成设置已保存' : 'Speech synthesis settings saved' }); }
-    catch (error) { if (live.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) }); }
-    finally { if (live.current) setSaving(false); }
-  }
-  async function clearKey() {
-    setSaving(true); setFeedback(null);
+    setSaving(true);
+    setFeedback(null);
     try {
-      await save('');
-      if (live.current) setFeedback({ error: false, text: zh ? '已清除密钥' : 'Key cleared' });
-    } catch (error) { if (live.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) }); }
-    finally { if (live.current) setSaving(false); }
+      await saveAll();
+      if (live.current) setFeedback({ error: false, text: zh ? '配音与分离设置已保存' : 'Dubbing & separation settings saved' });
+    } catch (error) {
+      if (live.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (live.current) setSaving(false);
+    }
   }
+
   async function generate() {
     if (running.current || blocked) return;
     const version = ++requestVersion.current;
-    running.current = true; setGenerating(true); setFeedback(null);
+    running.current = true;
+    setGenerating(true);
+    setFeedback(null);
     try {
-      await save();
+      await saveAll();
       if (version !== requestVersion.current) return;
       const result = await window.lingvoice.generateSpeech({ text });
       if (!live.current || version !== requestVersion.current) return;
@@ -104,9 +136,11 @@ export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse 
       const bytes = Uint8Array.from(atob(result.data.audioBase64), char => char.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: result.data.mimeType }));
       setAudio({ url, fileName: result.data.fileName });
-      setFeedback({ error: false, text: zh ? '生成完成，可试听或下载 MP3。' : 'Ready to preview or download as MP3.' });
+      setFeedback({ error: false, text: zh ? '本地配音测试成功，可试听或下载音频。' : 'Local voice test succeeded.' });
     } catch (error) {
-      if (live.current && version === requestVersion.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) });
+      if (live.current && version === requestVersion.current) {
+        setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) });
+      }
     } finally {
       if (version === requestVersion.current) {
         running.current = false;
@@ -114,72 +148,124 @@ export function TtsSettingsCard({ disabled, collapsed = false, onToggleCollapse 
       }
     }
   }
+
   async function cancel() {
     if (cancelling) return;
-    requestVersion.current++; setCancelling(true);
+    requestVersion.current++;
+    setCancelling(true);
     try {
       const result = await window.lingvoice.cancelTts();
-      if (live.current) setFeedback({ error: !result.ok, text: result.ok ? (zh ? '已取消生成。已发送的请求可能仍会计费。' : 'Generation cancelled. Submitted requests may still be billed.') : result.error });
+      if (live.current) setFeedback({ error: !result.ok, text: result.ok ? (zh ? '已取消测试。' : 'Test cancelled.') : result.error });
     } catch (error) {
       if (live.current) setFeedback({ error: true, text: error instanceof Error ? error.message : String(error) });
     } finally {
       running.current = false;
-      if (live.current) { setGenerating(false); setCancelling(false); }
+      if (live.current) {
+        setGenerating(false);
+        setCancelling(false);
+      }
     }
   }
 
-  return <section className={`settings-section tts-section${collapsed ? ' is-collapsed' : ''}`} aria-labelledby="tts-settings-title">
-    <div className="settings-section-heading">
-      <button
-        type="button"
-        className="settings-section-header"
-        onClick={onToggleCollapse}
-        aria-expanded={!collapsed}
-        aria-controls="tts-section-body"
-      >
-        <div>
-          <h3 id="tts-settings-title">{zh ? '视频配音服务 · TTS' : 'Video dubbing · TTS'}</h3>
-        </div>
-        <svg className="section-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="m6 9 6 6 6-6" />
-        </svg>
-      </button>
-    </div>
-    <div id="tts-section-body" className="settings-section-body">
-      <fieldset className="translation-fields" disabled={blocked}>
-        <div className="settings-form-grid">
-          <label>{zh ? '接口地址 (Base URL)' : 'Base URL'}<input id="tts-base-url" aria-describedby={tokenPlan ? 'tts-token-plan-hint' : undefined} type="url" value={settings.baseUrl} placeholder={DEFAULT_TTS_BASE_URL} spellCheck={false} onChange={event => setSettings(previous => ({ ...previous, baseUrl: event.target.value }))} /></label>
-          <label>{zh ? '配音模型' : 'Dubbing model'}<Select id="tts-model" value={dubbingModel(settings.model)} options={dubbingModelOptions} onChange={model => setSettings(previous => ({ ...previous, model }))} /></label>
-          <label>{zh ? 'API Key（密钥）' : 'API Key'}
-            <div className="secret-input">
-              <input
-                type={showKey ? 'text' : 'password'}
-                value={key}
-                autoComplete="off"
-                placeholder={hasKey ? (zh ? '已配置密钥；留空保留' : 'Key saved; leave blank to keep') : (zh ? '输入服务商 API Key' : 'Enter provider API key')}
-                onChange={event => setKey(event.target.value)}
-                aria-label={zh ? 'API Key' : 'API Key'}
-              />
-              <button type="button" aria-pressed={showKey} onClick={() => setShowKey(value => !value)}>
-                {zh ? (showKey ? '隐藏' : '显示') : (showKey ? 'Hide' : 'Show')}
-              </button>
+  return (
+    <section className={`settings-section tts-section${collapsed ? ' is-collapsed' : ''}`} aria-labelledby="tts-settings-title">
+      <div className="settings-section-heading">
+        <button
+          type="button"
+          className="settings-section-header"
+          onClick={onToggleCollapse}
+          aria-expanded={!collapsed}
+          aria-controls="tts-section-body"
+        >
+          <div className="settings-section-title-row">
+            <h3 id="tts-settings-title">{zh ? '视频配音与人声分离' : 'Dubbing & Vocal Separation'}</h3>
+            <span className="local-pill is-ready">GPT-SoVITS V5</span>
+          </div>
+          <svg className="section-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+      <div id="tts-section-body" className="settings-section-body">
+        <fieldset className="translation-fields" disabled={blocked}>
+          <div className="settings-summary-list">
+            <div className="settings-summary-item">
+              <strong>{zh ? '声音克隆引擎' : 'Voice cloning engine'}</strong>
+              <span>{zh
+                ? '本地 GPT-SoVITS V5 (v5turbo)：自动从分离后的原声干声提取参考音色进行配音克隆，无需手动上传样本。'
+                : 'Local GPT-SoVITS V5 (v5turbo): automatically clones timbre from separated original speech.'}</span>
             </div>
+            <div className="settings-summary-item">
+              <strong>{zh ? '人声分离与 BGM 保留' : 'Vocal separation & BGM'}</strong>
+              <span>{separationNote || (builtinSeparationReady
+                ? (zh ? '内置 Karaoke BS-RoFormer 已就绪：自动去除原视频说话人声，保留 BGM 与唱歌人声。' : 'Built-in Karaoke BS-RoFormer is ready.')
+                : (zh ? '正在检测分离环境…' : 'Checking separation environment…'))}</span>
+            </div>
+          </div>
+
+          <details className="settings-advanced-details">
+            <summary>{zh ? '高级选项：自定义本地 UVR 人声分离模型（可选，留空即使用内置模型）' : 'Advanced: custom local UVR separation model (optional)'}</summary>
+            <div className="settings-form-grid" style={{ marginTop: 12 }}>
+              <label>
+                {zh ? 'Python 可执行文件路径' : 'Python path'}
+                <input
+                  value={dubbing.pythonPath}
+                  onChange={event => setDubbing(prev => ({ ...prev, pythonPath: event.target.value }))}
+                  spellCheck={false}
+                  placeholder="python"
+                />
+              </label>
+              <label>
+                {zh ? '自定义分离模型权重绝对路径' : 'Custom separation model path'}
+                <input
+                  value={dubbing.modelFile}
+                  onChange={event => setDubbing(prev => ({ ...prev, modelFile: event.target.value }))}
+                  spellCheck={false}
+                  placeholder={zh ? '留空默认使用内置 Karaoke BS-RoFormer' : 'Leave empty to use built-in Karaoke BS-RoFormer'}
+                />
+              </label>
+            </div>
+          </details>
+
+          <label className="tts-text-field" style={{ marginTop: 14 }}>
+            {zh ? '测试本地配音（可选）' : 'Test local voice service (optional)'}
+            <textarea
+              aria-label={zh ? '测试配音文本' : 'Text to synthesize'}
+              maxLength={4096}
+              value={text}
+              onChange={event => setText(event.target.value)}
+              placeholder={zh ? '输入一句英文或中文测试本地 GPT-SoVITS V5 是否正常发声（需 references 目录有参考 WAV）…' : 'Enter sample text to test local GPT-SoVITS V5…'}
+            />
+            <span className="settings-hint" style={{ margin: '6px 0 0' }}>{text.length}/4096</span>
           </label>
-          <label className="checkbox-field"><input type="checkbox" checked={settings.fullUrl} onChange={event => setSettings(previous => ({ ...previous, fullUrl: event.target.checked }))} />{zh ? '接口地址是完整请求地址' : 'URL is a complete endpoint'}</label>
-        </div>
-        {tokenPlan && <p className="settings-hint" id="tts-token-plan-hint">{zh
-          ? 'Token Plan：会自动使用同一域名的 /api/v1 语音接口。当前官方文档列出 qwen-audio-3.0-tts-plus；音色复刻还需账号开放 voice-enrollment 权限，普通合成连接测试成功不代表支持复刻。'
-          : 'Token Plan uses the same host’s native /api/v1 speech API. Current documentation lists qwen-audio-3.0-tts-plus. Cloned dubbing additionally needs voice-enrollment access; a successful synthesis test does not verify cloning support.'}</p>}
-        <label className="tts-text-field">{zh ? '测试连通性文本' : 'Connectivity test text'}<textarea aria-label={zh ? '合成文本' : 'Text to synthesize'} maxLength={4096} value={text} onChange={event => setText(event.target.value)} placeholder={zh ? '输入测试文字以验证配音服务商连通性…' : 'Enter test text to verify dubbing provider connectivity…'} /><span className="settings-hint">{text.length}/4096</span></label>
-        <div className="settings-actions">
-          <button className="primary tts-save" type="button" onClick={() => void saveOnly()}>{saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存配音设置' : 'Save dubbing settings')}</button>
-          <button className="choose-file-button tts-generate" type="button" disabled={!canTest} onClick={() => void generate()}>{generating ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试配音连接' : 'Test dubbing connection')}</button>
-          {hasKey && <button className="text-button" type="button" onClick={() => void clearKey()}>{zh ? '清除密钥' : 'Clear key'}</button>}
-        </div>
-      </fieldset>
-      {generating && <button className="cancel-button tts-cancel" type="button" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? (zh ? '取消中…' : 'Cancelling…') : (zh ? '取消测试' : 'Cancel test')}</button>}
-      {feedback && <p className={`tts-feedback ${feedback.error ? 'settings-error' : 'settings-notice'}`} role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
-      {audio && <div className="tts-audio-result"><audio controls src={audio.url} aria-label={zh ? '合成语音试听' : 'Generated speech preview'} /><a className="text-button tts-download" href={audio.url} download={audio.fileName}>{zh ? '下载测试音频' : 'Download test audio'}</a></div>}
-    </div>
-  </section>;
+          <div className="settings-actions">
+            <button className="primary tts-save" type="button" onClick={() => void saveOnly()}>
+              {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存配音设置' : 'Save dubbing settings')}
+            </button>
+            <button className="choose-file-button tts-generate" type="button" disabled={!canTest} onClick={() => void generate()}>
+              {generating ? (zh ? '测试中…' : 'Testing…') : (zh ? '测试本地配音' : 'Test local dubbing')}
+            </button>
+          </div>
+        </fieldset>
+        {generating && (
+          <button className="cancel-button tts-cancel" type="button" disabled={cancelling} onClick={() => void cancel()}>
+            {cancelling ? (zh ? '取消中…' : 'Cancelling…') : (zh ? '取消测试' : 'Cancel test')}
+          </button>
+        )}
+        {feedback && (
+          <p className={`tts-feedback ${feedback.error ? 'settings-error' : 'settings-notice'}`} role={feedback.error ? 'alert' : 'status'}>
+            {feedback.text}
+          </p>
+        )}
+        {audio && (
+          <div className="tts-audio-result">
+            <audio controls src={audio.url} aria-label={zh ? '合成语音试听' : 'Generated speech preview'} />
+            <a className="text-button tts-download" href={audio.url} download={audio.fileName}>
+              {zh ? '下载测试音频' : 'Download test audio'}
+            </a>
+          </div>
+        )}
+      </div>
+    </section>
+  );
 }

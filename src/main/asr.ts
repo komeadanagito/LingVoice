@@ -7,6 +7,7 @@ import { createDefaultProviderRegistry, stripBgmHallucinations, type ProviderSer
 import { aliyunAsrEndpoint } from './aliyun-asr';
 const fallbackAsrAdapter = createDefaultProviderRegistry().get('openai-compatible').asr!;
 import { defaultAsrSettings, type AsrSettings, type AsrConfig, type AsrConfigUpdate, type AsrCue, type AsrProgress, type AsrRequest } from '../shared/asr';
+import type { LocalPluginManager } from './local-plugins';
 
 interface Vault { encrypt(value: string): string; decrypt(value: string): string }
 interface SavedConfig { settings: AsrSettings; apiKey: string }
@@ -15,6 +16,7 @@ interface Dependencies {
   fetch?: typeof fetch;
   /** Optional pre-ASR vocal stem separator. Returns a local dialogue WAV path when available. */
   prepareVocals?: (file: string, signal: AbortSignal) => Promise<string | undefined>;
+  localPlugins?: LocalPluginManager;
 }
 const BYTES_PER_SECOND = 32000;
 const CHUNK_BYTES = 300 * BYTES_PER_SECOND;
@@ -64,14 +66,235 @@ function apiUrl(value: unknown): URL {
 }
 function settings(value: unknown): AsrSettings {
   if (!record(value) || typeof value.fullUrl !== 'boolean') throw new Error('Invalid ASR settings.');
+  if (value.mode !== undefined && value.mode !== 'cloud' && value.mode !== 'local') throw new Error('Invalid ASR mode.');
   apiUrl(value.baseUrl);
   return {
+    ...(value.mode === 'local' ? { mode: 'local' as const } : {}),
     providerId: value.providerId === undefined ? 'legacy-asr' : text(value.providerId, 'provider ID', 200, true),
     baseUrl: (value.baseUrl as string).trim(), fullUrl: false,
     model: text(value.model, 'ASR model', 200).trim(),
     language: text(value.language, 'ASR language', 100, true).trim(),
     prompt: text(value.prompt, 'ASR prompt', 10000, true),
   };
+}
+
+interface LocalAsrWord { text?: unknown; start?: unknown; end?: unknown }
+interface LocalAsrSegment { start?: unknown; end?: unknown; text?: unknown; words?: unknown }
+
+function needsSpaceBetween(prev: string, next: string): boolean {
+  if (!prev || !next) return false;
+  const last = prev[prev.length - 1];
+  const first = next[0];
+  return /[A-Za-z0-9,.;:!?]/.test(last) && /[A-Za-z0-9]/.test(first);
+}
+
+export function localAsrResponseToCues(segments: unknown, offsetSeconds = 0): AsrCue[] {
+  if (!Array.isArray(segments)) return [];
+  const cues: AsrCue[] = [];
+  for (const rawSeg of segments as LocalAsrSegment[]) {
+    if (!record(rawSeg)) continue;
+    const segStart = typeof rawSeg.start === 'number' && Number.isFinite(rawSeg.start) ? rawSeg.start : 0;
+    const segEnd = typeof rawSeg.end === 'number' && Number.isFinite(rawSeg.end) ? rawSeg.end : segStart;
+    const rawText = typeof rawSeg.text === 'string' ? rawSeg.text : '';
+    const wordsRaw = Array.isArray(rawSeg.words) ? (rawSeg.words as LocalAsrWord[]).filter(w => record(w) && typeof w.text === 'string' && typeof w.start === 'number' && typeof w.end === 'number') : [];
+    if (wordsRaw.length > 0) {
+      let cursor = 0;
+      const tokens = wordsRaw.map(word => {
+        const wText = String(word.text);
+        let wStart = Number(word.start);
+        let wEnd = Math.max(wStart, Number(word.end));
+        let trailingPunct = '';
+        if (rawText && wText) {
+          const idx = rawText.indexOf(wText, cursor);
+          if (idx >= 0 && idx - cursor <= 8) {
+            cursor = idx + wText.length;
+            while (cursor < rawText.length && /^[.,!?;:'"”’）)\]】…，。！？；：、~～—\-]/.test(rawText[cursor])) {
+              trailingPunct += rawText[cursor];
+              cursor++;
+            }
+          }
+        }
+        return { text: wText, start: wStart, end: wEnd, punct: trailingPunct };
+      });
+      // Snap isolated ForcedAligner boundary outliers (e.g. first char aligned seconds before the rest of its word/phrase).
+      if (tokens.length >= 2 && !tokens[0].punct && tokens[0].text.length <= 2 && tokens[1].start - tokens[0].end > 1.0) {
+        tokens[0].end = tokens[1].start;
+        tokens[0].start = Math.max(0, Number((tokens[1].start - 0.16).toFixed(3)));
+      }
+      let cStart = -1;
+      let cEnd = -1;
+      let cText = '';
+      let wordCount = 0;
+      const flush = () => {
+        const cleaned = stripBgmHallucinations(cText);
+        if (cleaned && cStart >= 0) {
+          const start = Math.max(0, offsetSeconds + cStart);
+          const end = Math.max(start + 0.05, offsetSeconds + Math.max(cEnd, cStart));
+          cues.push({ id: 0, start: Number(start.toFixed(3)), end: Number(end.toFixed(3)), text: cleaned });
+        }
+        cStart = -1;
+        cEnd = -1;
+        cText = '';
+        wordCount = 0;
+      };
+      for (let ti = 0; ti < tokens.length; ti++) {
+        const tok = tokens[ti];
+        const wText = tok.text;
+        const wStart = tok.start;
+        const wEnd = tok.end;
+        const trailingPunct = tok.punct;
+        const hasCjkBefore = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(cText);
+        const minPauseLen = hasCjkBefore ? 12 : 28;
+        const maxClauseLen = hasCjkBefore ? 34 : 84;
+        const isTrailingParticle = tok.text.length <= 2 && /[。！？!?]/.test(trailingPunct) && !/[，,。！？!?；;]/.test(cText.slice(-1));
+        const pauseGap = wStart - cEnd;
+        if (
+          cStart >= 0 &&
+          !isTrailingParticle &&
+          ((cText.length >= minPauseLen && pauseGap >= 0.55 && !trailingPunct) ||
+            (cText.length >= (hasCjkBefore ? 6 : 14) && pauseGap >= 0.95) ||
+            (cEnd - cStart >= 8.0 && cText.length >= maxClauseLen))
+        ) {
+          flush();
+        }
+        if (cStart < 0) cStart = wStart;
+        cEnd = Math.max(cEnd, wEnd);
+        cText += (needsSpaceBetween(cText, wText) ? ' ' : '') + wText + trailingPunct;
+        wordCount++;
+        const checkStr = wText + trailingPunct;
+        const hasCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(cText);
+        const sentenceEnd = /[。！？!?；;\n][”’"）)\]】]*$/.test(checkStr) || /\.[”’"）)\]】]*$/.test(checkStr);
+        const commaBreak = /[，,：:][”’"）)\]】]*$/.test(checkStr) &&
+          ((cText.length >= (hasCjk ? 18 : 42) && cEnd - cStart >= 1.8) || cText.length >= (hasCjk ? 24 : 58));
+        const enumBreak = /、$/.test(checkStr) && cText.length >= 38;
+        const tooLong = hasCjk ? cText.length >= 40 : (cText.length >= 92 || wordCount >= 22);
+        if (sentenceEnd || commaBreak || enumBreak || tooLong) {
+          flush();
+        }
+      }
+      flush();
+      continue;
+    }
+    const segText = stripBgmHallucinations(rawText);
+    if (segText && segEnd > segStart) {
+      const rawSentences = segText.split(/([。！？!?；;\n]+)/).filter(Boolean);
+      const sentences: string[] = [];
+      for (const part of rawSentences) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        if (/^[。！？!?；;\n]+$/.test(trimmed) && sentences.length > 0) {
+          sentences[sentences.length - 1] += trimmed;
+        } else {
+          const cleanPart = stripBgmHallucinations(trimmed);
+          if (cleanPart) sentences.push(cleanPart);
+        }
+      }
+      const balanced: string[] = [];
+      for (const s of (sentences.length > 0 ? sentences : [segText])) {
+        const isCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(s);
+        const maxLen = isCjk ? 28 : 72;
+        if (s.length <= maxLen) {
+          balanced.push(s);
+          continue;
+        }
+        const pieces = s.split(/([，,]\s*)/).filter(Boolean);
+        let buf = '';
+        for (const piece of pieces) {
+          if (/^[，,]\s*$/.test(piece)) {
+            buf += piece.trim();
+            if (buf.length >= (isCjk ? 14 : 36)) {
+              balanced.push(buf);
+              buf = '';
+            }
+          } else if (buf && buf.length + piece.trim().length > maxLen && buf.length >= (isCjk ? 10 : 24)) {
+            balanced.push(buf);
+            buf = piece.trim();
+          } else {
+            buf += (buf && !isCjk && !/[，,]$/.test(buf) ? ' ' : '') + piece.trim();
+          }
+        }
+        if (buf.trim()) {
+          if (balanced.length > 0 && buf.trim().length < (isCjk ? 6 : 15) && balanced[balanced.length - 1].length + buf.trim().length <= maxLen + 8) {
+            balanced[balanced.length - 1] += (isCjk ? '' : ' ') + buf.trim();
+          } else {
+            balanced.push(buf.trim());
+          }
+        }
+      }
+      const list = balanced.length > 0 ? balanced : [segText];
+      const totalChars = list.reduce((sum, s) => sum + Math.max(1, s.length), 0);
+      let cursorStart = segStart;
+      const span = segEnd - segStart;
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i];
+        const partEnd = i === list.length - 1 ? segEnd : Math.min(segEnd, cursorStart + span * (Math.max(1, s.length) / totalChars));
+        if (partEnd > cursorStart) {
+          cues.push({
+            id: 0,
+            start: Number((offsetSeconds + cursorStart).toFixed(3)),
+            end: Number(Math.max(offsetSeconds + cursorStart + 0.05, offsetSeconds + partEnd).toFixed(3)),
+            text: s,
+          });
+          cursorStart = partEnd;
+        }
+      }
+    }
+  }
+  cues.sort((a, b) => a.start - b.start || a.end - b.end);
+  // Heal sentences split across ASR chunk boundaries or tiny orphan comma-tails without breaking distinct sentences.
+  const merged: AsrCue[] = [];
+  for (const cue of cues) {
+    const prev = merged[merged.length - 1];
+    if (prev) {
+      const gap = cue.start - prev.end;
+      const hasCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(prev.text + cue.text);
+      const maxCombined = hasCjk ? 36 : 84;
+      const prevTerminal = /[。！？!?；;\n][”’"）)\]】]*$/.test(prev.text) || /\.[”’"）)\]】]*$/.test(prev.text);
+      const prevComma = /[，,：:、]$/.test(prev.text);
+      const cueNoPunct = cue.text.replace(/[，,。！？!?.；;：:、\s"”’'）)\]】]/g, '');
+      const tinyNext = cueNoPunct.length <= (hasCjk ? 4 : 12);
+      const canHealSplit = gap >= -0.05 && gap <= 0.20 && !prevTerminal && (!prevComma || tinyNext);
+      const canAttachTinyCommaTail = prevComma && tinyNext && gap >= -0.05 && gap <= 0.60;
+      if ((canHealSplit || canAttachTinyCommaTail) && prev.text.length + cue.text.length <= maxCombined) {
+        prev.end = Math.max(prev.end, cue.end);
+        prev.text = `${prev.text}${needsSpaceBetween(prev.text, cue.text) ? ' ' : ''}${cue.text}`;
+        continue;
+      }
+    }
+    merged.push({ ...cue });
+  }
+  // Second pass: fold any remaining tiny non-terminal orphan cue into its adjacent neighbor when gap is small.
+  const healed: AsrCue[] = [];
+  for (let i = 0; i < merged.length; i++) {
+    const cur = merged[i];
+    const hasCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(cur.text);
+    const bareLen = cur.text.replace(/[，,。！？!?.；;：:、\s"”’'）)\]】]/g, '').length;
+    const isTerminal = /[。！？!?；;\n][”’"）)\]】]*$/.test(cur.text) || /\.[”’"）)\]】]*$/.test(cur.text);
+    const isTiny = bareLen <= (hasCjk ? 2 : 8);
+    if (isTiny && !isTerminal && i + 1 < merged.length && merged[i + 1].start - cur.end <= 0.7) {
+      const next = merged[i + 1];
+      const maxComb = hasCjk ? 36 : 84;
+      if (cur.text.length + next.text.length <= maxComb) {
+        next.start = Math.min(cur.start, next.start);
+        next.text = `${cur.text}${needsSpaceBetween(cur.text, next.text) ? ' ' : ''}${next.text}`;
+        continue;
+      }
+    }
+    healed.push(cur);
+  }
+  for (let i = 1; i < healed.length; i++) {
+    if (healed[i].start < healed[i - 1].end) {
+      if (healed[i].start > healed[i - 1].start + 0.05) {
+        healed[i - 1].end = healed[i].start;
+      } else {
+        healed[i].start = healed[i - 1].end;
+        if (healed[i].end <= healed[i].start) {
+          healed[i].end = Number((healed[i].start + 0.05).toFixed(3));
+        }
+      }
+    }
+  }
+  return healed;
 }
 
 export function asrEndpoint(config: AsrSettings): string {
@@ -240,7 +463,20 @@ export function parseAsrSegments(value: unknown, duration: number, offset = 0, p
     if (!cleaned) continue;
     cues.push({ id: 0, start: offset + rawStart, end: offset + Math.min(duration, rawEnd), text: cleaned });
   }
-  return cues.sort((a, b) => a.start - b.start || a.end - b.end).map((cue, index) => ({ ...cue, id: index + 1 }));
+  cues.sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 1; i < cues.length; i++) {
+    if (cues[i].start < cues[i - 1].end) {
+      if (cues[i].start > cues[i - 1].start + 0.05) {
+        cues[i - 1].end = cues[i].start;
+      } else {
+        cues[i].start = cues[i - 1].end;
+        if (cues[i].end <= cues[i].start) {
+          cues[i].end = Math.min(offset + duration, cues[i].start + 0.05);
+        }
+      }
+    }
+  }
+  return cues.filter(cue => cue.end > cue.start).map((cue, index) => ({ ...cue, id: index + 1 }));
 }
 
 export class AsrService {
@@ -489,6 +725,28 @@ export class AsrService {
     if (this.busy) throw new Error('ASR is already busy.');
     await this.pending;
     const state = await this.load();
+    if (state.settings.mode === 'local') {
+      const localPlugins = this.dependencies.localPlugins;
+      if (!localPlugins) throw new Error('当前后端未启用本地模型插件管理器。 / Local plugin manager is unavailable.');
+      const inputsDir = localPlugins.inputsDir();
+      await fs.mkdir(inputsDir, { recursive: true });
+      const filename = `lingvoice-test-${randomUUID()}.wav`;
+      const wavFile = path.join(inputsDir, filename);
+      const pcm = new Uint8Array(32000);
+      const view = new DataView(pcm.buffer);
+      for (let index = 0; index < 16000; index++) view.setInt16(index * 2, Math.round(Math.sin(index * 2 * Math.PI * 440 / 16000) * 10000), true);
+      await fs.writeFile(wavFile, pcmWav(pcm));
+      try {
+        await localPlugins.requestJson('asr', '/infer', {
+          audio_path: filename,
+          align: false,
+          device: 'cuda',
+        });
+      } finally {
+        await fs.rm(wavFile, { force: true }).catch(() => {});
+      }
+      return;
+    }
     if (!state.settings.providerId && !state.settings.baseUrl) {
       throw new Error('未配置语音识别接口地址，请在设置中填写 Base URL 或选择 Provider。');
     }
@@ -527,13 +785,19 @@ export class AsrService {
       if (!regular) throw new Error('The local media path must be an existing regular file.');
       await this.pending;
       const state = await this.load();
-      const provider = this.providers && state.settings.providerId ? await this.providers.resolve(state.settings.providerId, 'asr') : undefined;
-      let key = '';
-      try {
-        if (state.apiKey) key = text(this.vault.decrypt(state.apiKey), 'ASR credential', 8192, true);
-        else if (provider) key = provider.context.apiKey;
+      const useLocal = state.settings.mode === 'local';
+      if (useLocal && !this.dependencies.localPlugins) {
+        throw new Error('当前后端未启用本地模型插件管理器。 / Local plugin manager is unavailable.');
       }
-      catch { throw new Error('Unable to decrypt ASR credentials. Save the key again.'); }
+      const provider = !useLocal && this.providers && state.settings.providerId ? await this.providers.resolve(state.settings.providerId, 'asr') : undefined;
+      let key = '';
+      if (!useLocal) {
+        try {
+          if (state.apiKey) key = text(this.vault.decrypt(state.apiKey), 'ASR credential', 8192, true);
+          else if (provider) key = provider.context.apiKey;
+        }
+        catch { throw new Error('Unable to decrypt ASR credentials. Save the key again.'); }
+      }
       this.check(run.signal);
       temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'lingvoice-asr-'));
       const raw = path.join(temporary, 'audio.pcm');
@@ -570,10 +834,52 @@ export class AsrService {
             read += result.bytesRead;
           }
           const chunkDuration = length / BYTES_PER_SECOND;
-          const response = await this.upload(state.settings, key, pcm, run.signal, provider);
-          this.check(run.signal);
-          const parsed = provider ? provider.adapter.asr!.parse(response) : fallbackAsrAdapter.parse(response);
-          const segments = parseAsrSegments(parsed, chunkDuration, offset / BYTES_PER_SECOND, pcm);
+          let segments: AsrCue[];
+          if (useLocal) {
+            const localPlugins = this.dependencies.localPlugins!;
+            const inputsDir = localPlugins.inputsDir();
+            await fs.mkdir(inputsDir, { recursive: true });
+            const filename = `lingvoice-${randomUUID()}.wav`;
+            const wavFile = path.join(inputsDir, filename);
+            await fs.writeFile(wavFile, pcmWav(pcm));
+            try {
+              const lang = state.settings.language || null;
+              let response: { segments?: unknown };
+              try {
+                response = await localPlugins.requestJson<{ segments?: unknown }>('asr', '/infer', {
+                  audio_path: filename,
+                  language: lang,
+                  align: true,
+                  chunk_seconds: 20,
+                  max_new_tokens: 512,
+                  device: 'cuda',
+                }, run.signal);
+              } catch (err) {
+                const errCode = (err as { code?: string }).code;
+                if (errCode === 'unsupported_alignment_language' || errCode === 'alignment_failed') {
+                  response = await localPlugins.requestJson<{ segments?: unknown }>('asr', '/infer', {
+                    audio_path: filename,
+                    language: lang,
+                    align: false,
+                    chunk_seconds: 20,
+                    max_new_tokens: 512,
+                    device: 'cuda',
+                  }, run.signal);
+                } else {
+                  throw err;
+                }
+              }
+              this.check(run.signal);
+              segments = localAsrResponseToCues(response.segments, offset / BYTES_PER_SECOND);
+            } finally {
+              await fs.rm(wavFile, { force: true }).catch(() => {});
+            }
+          } else {
+            const response = await this.upload(state.settings, key, pcm, run.signal, provider);
+            this.check(run.signal);
+            const parsed = provider ? provider.adapter.asr!.parse(response) : fallbackAsrAdapter.parse(response);
+            segments = parseAsrSegments(parsed, chunkDuration, offset / BYTES_PER_SECOND, pcm);
+          }
           if (cues.length + segments.length > MAX_CUES) throw new Error('ASR result exceeds the subtitle count limit.');
           for (const cue of segments) cues.push(cue);
           this.progress({ stage: 'transcribing', completed: Math.floor(offset / CHUNK_BYTES) + 1, total });

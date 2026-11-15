@@ -1,0 +1,8 @@
+# CUDA wheels are installed separately from the official cu128 index by install.ps1.
+transformers==5.23.0
+numpy==1.26.4
+soundfile==0.13.1
+scipy==1.17.1
+librosa==0.11.0
+nagisa==0.2.11
+soynlp==0.0.493

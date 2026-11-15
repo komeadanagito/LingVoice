@@ -40,9 +40,11 @@ test('SQLite history persists upserts and selection, rejects missing selection, 
 
 test('history validates structured subtitle data, embed URLs and size before storing', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lingvoice-history-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const service = new HistoryService(path.join(directory, 'history.sqlite'));
-  t.after(() => service.close());
+  t.after(() => {
+    service.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   for (const value of [null, {}, { ...task(), id: '../secret' }, { ...task(), createdAt: NaN }, { ...task(), updatedAt: -1 },
     { ...task(), embed: 'javascript:alert(1)' }, { ...task(), embed: 'https://evil.example/embed/test' },
     { ...task(), subtitles: { ...task().subtitles, cues: [{ id: 1, start: 2, end: 1, text: '' }] } },

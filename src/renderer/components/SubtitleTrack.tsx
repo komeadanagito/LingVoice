@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { registerTaskRuntime, taskQueue } from '../utils/task-queue';
 import { useI18n } from '../i18n';
 import { advanceTranslationMemory, translationWindow, type TranslationMemoryState } from '../../shared/translation';
 import { activeSubtitles, exportSubtitles, subtitleBatches, type SubtitleCue } from '../utils/subtitles';
@@ -26,7 +27,9 @@ type SubtitleStage = 'recognize' | 'translate' | 'dub';
 export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime: number, localPath: string, onSeek?: (time: number) => void, saved?: SavedSubtitles, onSave?: (snapshot: SavedSubtitles) => void, sourceKey?: string) {
   const { locale } = useI18n();
   const zh = locale === 'zh-CN';
-  const [cues, setCues] = useState<SubtitleCue[]>(saved?.cues ?? []);
+  const [cues, setCueState] = useState<SubtitleCue[]>(saved?.cues ?? []);
+  const cuesRef = useRef(cues);
+  const setCues = useCallback((next: SubtitleCue[]) => { cuesRef.current = next; setCueState(next); }, []);
   const [mode, setMode] = useState<Mode>(saved?.mode ?? 'bilingual');
   const [name, setName] = useState(saved?.name ?? '');
   const [busy, setBusy] = useState(false);
@@ -110,15 +113,48 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       translating: zh ? '正在校对配音台词…' : 'Preparing spoken text…',
       voice: zh ? '正在提取并复刻音色…' : 'Extracting and cloning voice…',
       synthesizing: `${zh ? '正在生成配音语音' : 'Generating speech'} ${event.completed}/${event.total}`,
+      aligning: `${zh ? '正在对齐配音时间轴' : 'Aligning dubbing timeline'} ${event.completed}/${event.total}`,
       mixing: zh ? '正在混音渲染最终视频…' : 'Mixing and exporting final video…',
     };
     setProgress(stageMap[event.stage] || `${zh ? '配音处理中：' : 'Dubbing: '}${event.message}`);
   }), [zh]);
 
+  const queueId = sourceKey || mediaKey;
   async function runStage(nextStage: SubtitleStage) {
-    if (running.current || !localPath) return;
-    if (nextStage !== 'recognize' && !cues.length) return;
-    if (nextStage === 'dub' && cues.some(cue => !cue.translated?.trim())) return;
+    return taskQueue.enqueue(queueId, async signal => {
+      const cancel = () => stop();
+      signal.addEventListener('abort', cancel, { once: true });
+      try { signal.throwIfAborted(); await executeStage(nextStage); signal.throwIfAborted(); }
+      finally { signal.removeEventListener('abort', cancel); }
+    });
+  }
+  const runtimeActionsRef = useRef({ executeStage, stop });
+  runtimeActionsRef.current = { executeStage, stop };
+  useEffect(() => registerTaskRuntime(queueId, {
+    source: localPath,
+    stop: () => runtimeActionsRef.current.stop(),
+    pipeline: async signal => {
+      const cancel = () => runtimeActionsRef.current.stop();
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        signal.throwIfAborted();
+        if (!cuesRef.current.length) await runtimeActionsRef.current.executeStage('recognize');
+        signal.throwIfAborted();
+        if (cuesRef.current.some(cue => !cue.translated?.trim())) await runtimeActionsRef.current.executeStage('translate');
+        signal.throwIfAborted();
+        await runtimeActionsRef.current.executeStage('dub');
+        signal.throwIfAborted();
+      } finally { signal.removeEventListener('abort', cancel); }
+    },
+  }), [queueId, localPath]);
+  useEffect(() => {
+    if (busy) taskQueue.update(queueId, { state: 'running', stage: stage ?? '', progress });
+  }, [busy, stage, progress, queueId]);
+
+  async function executeStage(nextStage: SubtitleStage) {
+    if (running.current || !localPath) throw new Error(zh ? '任务正在运行或视频尚未就绪。' : 'Task is running or video is not ready.');
+    if (nextStage !== 'recognize' && !cuesRef.current.length) throw new Error(zh ? '请先识别字幕。' : 'Transcribe subtitles first.');
+    if (nextStage === 'dub' && cuesRef.current.some(cue => !cue.translated?.trim())) throw new Error(zh ? '请先完成字幕翻译。' : 'Complete subtitle translation first.');
     const token = ++generation.current;
     running.current = true;
     setBusy(true);
@@ -127,13 +163,13 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
     setResult(null);
 
     try {
-      let workingCues: SubtitleCue[] = cues.map(cue => ({ ...cue }));
+      let workingCues: SubtitleCue[] = cuesRef.current.map(cue => ({ ...cue }));
       if (nextStage === 'recognize') {
       setProgress(zh ? '正在准备音频识别…' : 'Preparing audio transcription…');
       const asrConfig = await window.lingvoice.asrConfig();
       if (token !== generation.current) return;
       if (!asrConfig.ok) throw new Error(asrConfig.error);
-      if (!asrConfig.data.settings.providerId && !asrConfig.data.settings.baseUrl) {
+      if (asrConfig.data.settings.mode !== 'local' && !asrConfig.data.settings.providerId && !asrConfig.data.settings.baseUrl) {
         throw new Error(zh ? '请先在「设置 - 语音识别」中填写 Base URL 或选择 Provider。' : 'Configure speech recognition Base URL or select a Provider in Settings first.');
       }
 
@@ -158,7 +194,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       const transConfig = await window.lingvoice.translationConfig();
       if (token !== generation.current) return;
       if (!transConfig.ok) throw new Error(transConfig.error);
-      if (!transConfig.data.settings.providerId) {
+      if (transConfig.data.settings.mode !== 'local' && !transConfig.data.settings.providerId) {
         throw new Error(zh ? '请先在「设置 - 字幕翻译」中选择翻译 Provider。' : 'Choose a translation provider in Settings first.');
       }
 
@@ -220,7 +256,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       const REVIEW_CHUNK = 60;
       const MAX_ROUNDS = 2;
       const MAX_PATCHES_PER_ROUND = 40;
-      const isMachine = transConfig.data.settings.engine === 'machine' && !transConfig.data.settings.providerId;
+      const isMachine = transConfig.data.settings.mode === 'local' || (transConfig.data.settings.engine === 'machine' && !transConfig.data.settings.providerId);
 
       if (!isMachine && workingCues.length > 0) {
         for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -302,12 +338,13 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       if (!dubbingResponse.ok) throw new Error(dubbingResponse.error);
 
       setResult(dubbingResponse.data);
-      setProgress(zh ? '视频配音制作完成！已自动加载并在下方提供试听与下载。' : 'Video dubbing complete! Preview and download below.');
+      setProgress(zh ? '视频配音制作完成！可在播放器顶部切换原视频与配音视频。' : 'Dubbing complete! Switch between original and dubbed video in the player header.');
     } catch (err) {
       if (token === generation.current) {
         setProgress('');
         setError(err instanceof Error ? err.message : String(err));
       }
+      throw err;
     } finally {
       if (token === generation.current) {
         recognizing.current = false;
@@ -384,7 +421,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
           <span>{stage === 'dub' ? (zh ? '配音中…' : 'Dubbing…') : (zh ? '配音' : 'Dub')}</span>
         </button>
       </div>
-      {busy && <button type="button" className="text-button subtitle-stop" onClick={stop}>{zh ? '停止' : 'Stop'}</button>}
+      {busy && <button type="button" className="text-button subtitle-stop" onClick={() => { taskQueue.cancel(queueId); stop(); }}>{zh ? '停止' : 'Stop'}</button>}
       <Select
         value={mode}
         options={modeOptions}
@@ -410,7 +447,7 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
           <Icon name="mic" size={14} />
           <span>{zh ? '配音制作完成' : 'Dubbing ready'} ({result.targetLanguage})</span>
         </div>
-        <audio controls src={mediaUrl(result.audio)} aria-label={zh ? '配音音频试听' : 'Dubbed audio preview'} />
+        <p className="subtitle-hint">{zh ? '在播放器顶部选择「配音视频」即可观看，画面与配音一起播放。' : 'Select Dubbed video above the player to watch with translated speech.'}</p>
         <div className="dubbing-result-actions">
           <a className="choose-file-button" href={mediaUrl(result.video)} download>{zh ? '下载配音视频' : 'Download video'}</a>
           <a className="choose-file-button" href={mediaUrl(result.audio)} download>{zh ? '下载配音音频' : 'Download audio'}</a>
@@ -516,5 +553,5 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
     </div>)}
   </div>;
 
-  return { toolbar, overlay, cues, offset, snapshot: { cues, offset, file: localPath, sourceKey: videoSrc } };
+  return { toolbar, overlay, cues, offset, result, snapshot: { cues, offset, file: localPath, sourceKey: videoSrc } };
 }

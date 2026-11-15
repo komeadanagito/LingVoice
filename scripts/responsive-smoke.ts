@@ -88,13 +88,8 @@ app.whenReady().then(async () => {
       input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await pause(100);
-    await window.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.subtitle-toolbar input[type=file]');
-      const data = new DataTransfer();
-      data.items.add(new File(['1\\n00:00:00,000 --> 00:00:05,000\\nHello world'], 'example.srt'));
-      input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await pause(150);
+    await window.webContents.executeJavaScript("document.querySelector('.asr-start').click()");
+    await pause(250);
     for (const [width, height] of sizes) {
       window.setContentSize(width, height);
       await pause(120);
@@ -109,7 +104,7 @@ app.whenReady().then(async () => {
       const toggle = document.querySelector('.app-right-sidebar-toggle').getBoundingClientRect();
       return { top: toolbar.top, besideToggle: toolbar.right <= toggle.left + 1,
         hint: document.querySelector('.subtitle-hint')?.textContent };
-    })()`), { top: 8, besideToggle: true, hint: 'example.srt · 1 条字幕' }, 'Toolbar sits beside the top toggle and retains imported subtitle state');
+    })()`), { top: 8, besideToggle: true, hint: 'transcription.srt · 1 条字幕' }, 'Toolbar sits beside the top toggle and retains transcribed subtitle state');
     for (const [width, height] of sizes) {
       window.setContentSize(width, height);
       await pause(120);
@@ -199,16 +194,15 @@ app.whenReady().then(async () => {
       return page.scrollTop > 0 && getComputedStyle(page).scrollbarWidth === 'none';
     })()`), true, 'Settings remain scrollable without scrollbars');
     console.log('PASS: settings scroll without visible scrollbars');
-    await window.webContents.executeJavaScript("document.querySelector('.translation-section .fetch-models').click()");
     await pause(150);
     for (const [width, height] of sizes) {
       window.setContentSize(width, height);
       await pause(120);
       const overflow: string[] = await window.webContents.executeJavaScript(`(() => {
-        const selectors = ['.settings-page', '.settings-section', '.settings-form-grid', '.model-input', '.settings-actions', '.tts-text-field'];
+        const selectors = ['.settings-page', '.settings-section', '.local-engines-grid', '.settings-cards-grid', '.settings-form-grid', '.settings-summary-list', '.settings-actions', '.tts-text-field'];
         return selectors.filter(selector => [...document.querySelectorAll(selector)].some(element => element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1));
       })()`);
-      assert.deepEqual(overflow, [], `Settings with shared model lists fit ${width}x${height}`);
+      assert.deepEqual(overflow, [], `Local settings fit ${width}x${height}`);
     }
     window.setContentSize(1024, 482);
     console.log('PASS: translation, ASR and TTS settings fit all responsive sizes');

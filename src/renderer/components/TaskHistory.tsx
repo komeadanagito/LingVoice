@@ -1,6 +1,14 @@
+import { useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { taskStatus, type HistoryTask } from '../utils/task-history';
 import { Icon } from './Icon';
+
+export interface TaskExecution {
+  state: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  stage?: string;
+  progress?: string;
+  error?: string;
+}
 
 interface Props {
   tasks: HistoryTask[];
@@ -9,47 +17,131 @@ interface Props {
   onOpenTask: (id: string) => void;
   onDeleteTask: (id: string) => void;
   onNewTask: () => void;
+  onImportFiles?: (files: File[]) => void;
+  onImportLinks?: (urls: string[]) => void;
+  onRunTasks?: (ids: string[]) => void;
+  onCancelTask?: (id: string) => void;
+  executions?: Record<string, TaskExecution>;
 }
 
-export function TaskHistory({ tasks, activeTaskId, ready, onOpenTask, onDeleteTask, onNewTask }: Props) {
-  const { locale } = useI18n();
-  const zh = locale === 'zh-CN';
-  const statuses = zh
-    ? { created: '已创建', recognized: '已识别', translated: '已翻译', dubbed: '配音完成' }
-    : { created: 'Created', recognized: 'Transcribed', translated: 'Translated', dubbed: 'Dubbed' };
+export function TaskHistory({ tasks, activeTaskId, ready, onOpenTask, onDeleteTask, onNewTask, onImportFiles, onImportLinks, onRunTasks, onCancelTask, executions = {} }: Props) {
+  const { t, locale } = useI18n();
+  const fileInput = useRef<HTMLInputElement>(null);
+  const selectAll = useRef<HTMLInputElement>(null);
+  const linksInput = useRef<HTMLTextAreaElement>(null);
+  const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [links, setLinks] = useState('');
+  const [invalidLinks, setInvalidLinks] = useState<string[]>([]);
+  const [emptyLinks, setEmptyLinks] = useState(false);
+  const selected = tasks.filter(task => selection.has(task.id));
+  const allSelected = tasks.length > 0 && selected.length === tasks.length;
+  const executing = (id: string) => executions[id]?.state === 'running' || executions[id]?.state === 'queued';
   const ordered = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt);
+  const statuses = {
+    created: t('history.created'), recognized: t('history.recognized'),
+    translated: t('history.translated'), dubbed: t('history.dubbed'),
+  };
+  const executionLabels = {
+    queued: t('history.queued'), running: t('history.running'), completed: t('history.completed'),
+    failed: t('history.failed'), cancelled: t('history.cancelled'),
+  };
+  const importLinks = () => {
+    const entries = links.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const invalid = entries.filter(entry => {
+      try {
+        const url = new URL(entry);
+        return !/^https?:\/\//i.test(entry) || !['http:', 'https:'].includes(url.protocol) || !url.hostname
+          || Boolean(url.username || url.password) || /\s/.test(entry);
+      } catch { return true; }
+    });
+    setInvalidLinks(invalid);
+    setEmptyLinks(entries.length === 0);
+    if (!entries.length || invalid.length) {
+      linksInput.current?.focus();
+      return;
+    }
+    // URL normalization also deduplicates equivalent host names and trailing slashes.
+    onImportLinks?.([...new Set(entries.map(entry => new URL(entry).href))]);
+    setLinks('');
+  };
   return <div className="task-history">
     <header className="task-history-heading">
       <div>
-        <h2 id="task-history-heading">{zh ? '历史记录' : 'Task history'} <span>{tasks.length}</span></h2>
-        <p>{zh ? '查看已创建的任务，继续识别、翻译或配音。' : 'Open a saved task to continue transcription, translation or dubbing.'}</p>
+        <h2 id="task-history-heading">{t('nav.history')} <span>{tasks.length}</span></h2>
+        <p>{t('history.description')}</p>
       </div>
-      <button type="button" className="choose-file-button" onClick={onNewTask} disabled={!ready}><Icon name="addTask" size={16} />{zh ? '新建任务' : 'New task'}</button>
+      <button type="button" className="choose-file-button" onClick={onNewTask} disabled={!ready}><Icon name="addTask" size={16} />{t('history.new')}</button>
     </header>
-    {!ready ? <p className="task-history-empty" role="status">{zh ? '正在读取任务…' : 'Loading tasks…'}</p>
+    <section className="task-history-import" aria-label={t('history.importTitle')}>
+      <div className="task-history-file-import">
+        <input ref={fileInput} type="file" multiple accept="video/*,.mkv,.avi,.mov,.webm,.mp4" className="sr-only" tabIndex={-1} aria-label={t('history.importFiles')} disabled={!ready || !onImportFiles} onChange={event => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          if (files.length) onImportFiles?.(files);
+          event.currentTarget.value = '';
+        }} />
+        <button type="button" className="choose-file-button" disabled={!ready || !onImportFiles} onClick={() => fileInput.current?.click()}>{t('history.importFiles')}</button>
+        <p>{t('history.fileHint')}</p>
+      </div>
+      <div className="task-history-link-import">
+        <label htmlFor="task-history-links">{t('history.linksLabel')}</label>
+        <textarea ref={linksInput} id="task-history-links" rows={3} value={links} placeholder="https://example.com/video" disabled={!ready || !onImportLinks} aria-invalid={invalidLinks.length > 0 || emptyLinks} aria-describedby={`task-history-links-hint${invalidLinks.length || emptyLinks ? ' task-history-links-error' : ''}`} onChange={event => {
+          setLinks(event.target.value); setInvalidLinks([]); setEmptyLinks(false);
+        }} />
+        <p id="task-history-links-hint">{t('history.linksHint')}</p>
+        {(invalidLinks.length > 0 || emptyLinks) && <div id="task-history-links-error" className="task-history-import-error" role="alert">
+          <p>{emptyLinks ? t('history.linksEmpty') : t('history.linksInvalid')}</p>
+          {invalidLinks.length > 0 && <ul>{invalidLinks.map((entry, index) => <li key={index}>{entry}</li>)}</ul>}
+        </div>}
+        <button type="button" className="choose-file-button" onClick={importLinks} disabled={!ready || !onImportLinks || !links.trim()}>{t('history.importLinks')}</button>
+      </div>
+    </section>
+    <div className="task-history-batch">
+      <label className="task-history-select-all">
+        <input ref={node => { selectAll.current = node; if (node) node.indeterminate = selected.length > 0 && !allSelected; }} type="checkbox" checked={allSelected} disabled={!ready || !tasks.length} onChange={event => setSelection(event.target.checked ? new Set(tasks.map(task => task.id)) : new Set())} />
+        {t('history.selectAll')}
+      </label>
+      <span className="task-history-selected-count" role="status">{t('history.selectedCount', { count: selected.length })}</span>
+      <button type="button" className="choose-file-button task-history-run" disabled={!ready || !onRunTasks || !selected.length || selected.some(task => executing(task.id))} onClick={() => {
+        if (window.confirm(t('history.runConsent', { count: selected.length }))) onRunTasks?.(selected.map(task => task.id));
+      }}>{t('history.run')}</button>
+    </div>
+    {!ready ? <p className="task-history-empty" role="status">{t('history.loading')}</p>
       : !tasks.length ? <div className="task-history-empty-state">
         <Icon name="history" size={32} />
-        <h3>{zh ? '还没有历史任务' : 'No saved tasks yet'}</h3>
-        <p>{zh ? '打开视频或解析链接后，任务会自动保存在这里。' : 'Open a video or inspect a link to automatically save a task here.'}</p>
-        <button type="button" className="choose-file-button" onClick={onNewTask}>{zh ? '创建第一个任务' : 'Create your first task'}</button>
-      </div> : <div className="task-history-list" aria-label={zh ? '已保存的任务列表' : 'Saved tasks'}>
+        <h3>{t('history.empty')}</h3>
+        <p>{t('history.emptyHint')}</p>
+        <button type="button" className="choose-file-button" onClick={onNewTask}>{t('history.first')}</button>
+      </div> : <div className="task-history-list" aria-label={t('history.listLabel')}>
         {ordered.map(task => {
           const count = task.subtitles?.cues.length ?? 0;
           const translated = task.subtitles?.cues.filter(cue => cue.translated?.trim()).length ?? 0;
-          return <div className={`task-history-row${activeTaskId === task.id ? ' is-active' : ''}`} key={task.id}>
-            <button type="button" className="task-history-open" onClick={() => onOpenTask(task.id)} title={task.title}>
-              <span className="task-history-title"><Icon name="video" size={19} /><span>{task.title || (zh ? '未命名任务' : 'Untitled task')}</span></span>
-              <span className="task-history-meta">{statuses[taskStatus(task)]}{count > 0 ? ` · ${translated}/${count} ${zh ? '条已翻译' : 'translated'}` : ''}</span>
-              <time dateTime={new Date(task.updatedAt).toISOString()}>{new Date(task.updatedAt).toLocaleString(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
-            </button>
-            <button type="button" className="task-history-delete" aria-label={`${zh ? '删除任务' : 'Delete task'} ${task.title}`} title={zh ? '删除历史记录' : 'Delete history entry'} onClick={() => {
-              if (window.confirm(zh ? `删除任务「${task.title}」的历史、字幕和配音记录？磁盘上的视频与导出文件不会删除。` : `Delete the history, subtitles and dubbing record for “${task.title}”? Videos and exported files on disk will be kept.`)) onDeleteTask(task.id);
+          const execution = executions[task.id];
+          const busy = executing(task.id);
+          const title = task.title || t('history.untitled');
+          return <div className={`task-history-row${activeTaskId === task.id ? ' is-active' : ''}${selection.has(task.id) ? ' is-selected' : ''}`} key={task.id}>
+            <label className="task-history-select"><input type="checkbox" checked={selection.has(task.id)} aria-label={t('history.selectTask', { title })} onChange={event => {
+              const checked = event.target.checked;
+              setSelection(previous => { const next = new Set(previous); if (checked) next.add(task.id); else next.delete(task.id); return next; });
+            }} /></label>
+            <div className="task-history-row-content">
+              <button type="button" className="task-history-open" onClick={() => onOpenTask(task.id)} title={title}>
+                <span className="task-history-title"><Icon name="video" size={19} /><span>{title}</span></span>
+                <span className="task-history-meta">{statuses[taskStatus(task)]}{count > 0 ? ` · ${t('history.translatedCount', { translated, count })}` : ''}</span>
+                <time dateTime={new Date(task.updatedAt).toISOString()}>{new Date(task.updatedAt).toLocaleString(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
+              </button>
+              {execution && <div className="task-history-execution" role="status" aria-live="polite">
+                <span className={`task-history-badge is-${execution.state}`}>{executionLabels[execution.state]}</span>
+                {execution.stage && <span>{execution.stage}</span>}
+                {execution.progress && <span>{execution.progress}</span>}
+                {execution.error && <span className="task-history-execution-error">{execution.error}</span>}
+              </div>}
+            </div>
+            {busy && onCancelTask && <button type="button" className="task-history-cancel" aria-label={t('history.cancelTask', { title })} onClick={() => onCancelTask(task.id)}>{t('history.cancel')}</button>}
+            <button type="button" className="task-history-delete" disabled={busy} aria-label={t('history.deleteTask', { title })} title={busy ? t('history.deleteBusy') : t('history.delete')} onClick={() => {
+              if (window.confirm(t('history.deleteConsent', { title }))) onDeleteTask(task.id);
             }}>×</button>
           </div>;
         })}
       </div>}
-    <p className="task-history-note">{window.lingvoice.runtime === 'browser'
-      ? (zh ? '历史记录与字幕保存在服务端 SQLite 数据库，视频文件单独保存在磁盘；清除浏览器数据不会删除已保存任务。' : 'History and subtitles are stored in the server SQLite database; videos are stored on disk. Clearing browser data does not delete saved tasks.')
-      : (zh ? '历史记录保存在本机 SQLite 数据库；请保留原视频文件，移动或删除后需重新打开。' : 'History is saved in SQLite on this device. Keep source videos at their original paths.')}</p>
   </div>;
 }

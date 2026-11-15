@@ -1,4 +1,7 @@
+import type { InferenceMode } from './local-models';
+
 export interface TranslationSettings {
+  mode?: InferenceMode;
   /** Provider identity; endpoints and credentials are owned by the provider catalog. */
   providerId?: string;
   /** @deprecated Retained for migration/standalone callers; providerId selects the live adapter. */

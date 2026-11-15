@@ -1,0 +1,39 @@
+{
+  "nltk_data_revision": "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a",
+  "assets": [
+    {
+      "source": "packages/taggers/averaged_perceptron_tagger.zip",
+      "destination": "downloads/nltk/averaged_perceptron_tagger.zip",
+      "bytes": 2526731,
+      "sha256": null,
+      "git_blob_sha1": "d5bfb6852aa5d288c8f33b3f0ef0fde343afa405",
+      "category": "taggers",
+      "url": "https://raw.githubusercontent.com/nltk/nltk_data/550b6625bcef1f2abff2ff770a5a0d272c9c6b2a/packages/taggers/averaged_perceptron_tagger.zip"
+    },
+    {
+      "source": "packages/taggers/averaged_perceptron_tagger_eng.zip",
+      "destination": "downloads/nltk/averaged_perceptron_tagger_eng.zip",
+      "bytes": 1539115,
+      "sha256": null,
+      "git_blob_sha1": "b792e19546a5711218a05f4029ef17c8d62cd839",
+      "category": "taggers",
+      "url": "https://raw.githubusercontent.com/nltk/nltk_data/550b6625bcef1f2abff2ff770a5a0d272c9c6b2a/packages/taggers/averaged_perceptron_tagger_eng.zip"
+    },
+    {
+      "source": "packages/corpora/cmudict.zip",
+      "destination": "downloads/nltk/cmudict.zip",
+      "bytes": 896069,
+      "sha256": null,
+      "git_blob_sha1": "48f1d64a431c474142969a793dfcffe3a2fc877b",
+      "category": "corpora",
+      "url": "https://raw.githubusercontent.com/nltk/nltk_data/550b6625bcef1f2abff2ff770a5a0d272c9c6b2a/packages/corpora/cmudict.zip"
+    }
+  ],
+  "language_detector": {
+    "url": "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin",
+    "destination": "upstream/GPT_SoVITS/pretrained_models/fast_langdetect/lid.176.bin",
+    "md5": "01810bc59c6a3d2b79c79e6336612f65",
+    "sha256": "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e",
+    "bytes": 131266198
+  }
+}

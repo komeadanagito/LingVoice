@@ -1,0 +1,12 @@
+{
+  "status": "loaded",
+  "version": "v5turbo",
+  "device": "cuda",
+  "torch": "2.6.0+cu126",
+  "cuda": "12.6",
+  "gpu": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "peak_allocated_bytes": 2322021376,
+  "seconds": 10.34,
+  "synthesized_audio": false,
+  "source_revision": "e91506f1fba265e1841617c3042a1573206a7351"
+}

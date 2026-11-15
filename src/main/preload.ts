@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { DubbingProgress } from '../shared/dubbing';
 import type { AsrProgress } from '../shared/asr';
+import type { LocalModelDownloadProgress } from '../shared/local-models';
 import type { DownloadEvent, IpcContract, IpcResult, LingVoiceApi } from '../shared/contracts';
 
 function invoke<K extends keyof IpcContract>(
@@ -26,6 +27,15 @@ const api: LingVoiceApi = {
     const listener = (_event: IpcRendererEvent, data: DubbingProgress): void => callback(data);
     ipcRenderer.on('dubbing:progress', listener);
     return () => ipcRenderer.removeListener('dubbing:progress', listener);
+  },
+  localModelsStatus: () => invoke('localModels:status'),
+  stopLocalModels: id => invoke('localModels:stop', id),
+  downloadLocalModels: request => invoke('localModels:download', request),
+  cancelLocalModelsDownload: () => invoke('localModels:cancelDownload'),
+  onLocalModelsDownloadProgress: callback => {
+    const listener = (_event: IpcRendererEvent, data: LocalModelDownloadProgress): void => callback(data);
+    ipcRenderer.on('localModels:downloadProgress', listener);
+    return () => ipcRenderer.removeListener('localModels:downloadProgress', listener);
   },
   providers: () => invoke('providers:list'),
   saveProvider: update => invoke('providers:save', update),

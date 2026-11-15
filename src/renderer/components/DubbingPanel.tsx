@@ -15,7 +15,8 @@ export function DubbingPanel({ file, cues, offset, disabled, sourceKey }: Props)
   const [working, setWorking] = useState(false);
   const [running, setRunning] = useState(false);
   const [consent, setConsent] = useState(false);
-  const [volume, setVolume] = useState(1);
+  const [volume, setVolume] = useState(0.75);
+  const [separationReady, setSeparationReady] = useState<boolean | null>(null);
   const [edits, setEdits] = useState<Record<number, string>>({});
   const [result, setResult] = useState<DubbingResult | null>(null);
   const [voices, setVoices] = useState<{ voiceId: string; baseUrl: string }[]>([]);
@@ -45,7 +46,13 @@ export function DubbingPanel({ file, cues, offset, disabled, sourceKey }: Props)
       setVoicesError('');
       if (response.data.ttsProviderName) setTtsProvider(response.data.ttsProviderName);
       if (response.data.hasTtsApiKey !== undefined) setHasTtsKey(response.data.hasTtsApiKey);
-      if (loadSettings) { setSettings(response.data.settings); setLoaded(true); }
+      if (loadSettings) {
+        setSettings(response.data.settings);
+        setLoaded(true);
+        void window.lingvoice.checkDubbing().then(env => {
+          if (alive.current && env.ok) setSeparationReady(Boolean(env.data.ready || env.data.builtinSeparationReady));
+        }).catch(() => {});
+      }
     } catch (reason) {
       if (alive.current && request === voicesVersion.current) setVoicesError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -87,7 +94,8 @@ export function DubbingPanel({ file, cues, offset, disabled, sourceKey }: Props)
         const checked = await window.lingvoice.checkDubbing();
         if (!checked.ok) throw new Error(checked.error);
         if (!alive.current) return;
-        if (!checked.data.ready) throw new Error(checked.data.message);
+        if (!checked.data.ready && !checked.data.builtinSeparationReady) throw new Error(checked.data.message);
+        setSeparationReady(true);
         setNotice(checked.data.message);
       } else setNotice(zh ? '配音配置已保存。' : 'Dubbing settings saved.');
     } catch (reason) { if (alive.current) setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -210,6 +218,16 @@ export function DubbingPanel({ file, cues, offset, disabled, sourceKey }: Props)
                 <legend className="sr-only">{zh ? '逐句配音文本' : 'Spoken text per cue'}</legend>
                 <div className="dubbing-cues">{cues.map(cue => <label key={cue.id} className="dubbing-cue"><span>#{cue.id} · {cue.start.toFixed(1)}–{cue.end.toFixed(1)}s</span><span>{cue.text}</span><textarea rows={2} aria-label={`${zh ? '配音文本' : 'Spoken text'} #${cue.id}`} value={edits[cue.id] ?? cue.speechText ?? cue.translated ?? ''} onChange={event => setEdits(previous => ({ ...previous, [cue.id]: event.target.value }))} placeholder={zh ? '留空由后端翻译' : 'Leave blank for backend translation'} /></label>)}</div>
                 <label className="dubbing-volume">{zh ? '背景音量' : 'Background volume'}<input type="range" min={0} max={2} step={0.05} value={volume} onChange={event => setVolume(Math.max(0, Math.min(2, Number(event.target.value))))} /><output>{Math.round(volume * 100)}%</output></label>
+                {!settings.modelFile && separationReady === true && (
+                  <p className="settings-hint">{zh
+                    ? '已启用内置 Karaoke BS-RoFormer 高级人声分离：去除原说话人声的同时保留伴奏与唱歌 BGM（非说话段落完整复用原声 BGM）。'
+                    : 'Built-in Karaoke BS-RoFormer separation is active: spoken dialogue is removed while instrumental and singing BGM are preserved.'}</p>
+                )}
+                {!settings.modelFile && separationReady === false && (
+                  <p className="settings-notice">{zh
+                    ? '未配置「已下载的本地权重文件」（UVR 人声分离模型）：为避免原视频人声串音，配音将静音原视频背景音（输出无 BGM）。如需保留 BGM，请在上方填写本地 UVR 分离模型路径并检查环境。'
+                    : 'No local separation model is configured: original background audio (BGM) will be muted to prevent source speech bleed. Configure a local UVR model above to preserve BGM.'}</p>
+                )}
                 <p className="settings-hint">{zh ? '整段视频仅发送至本机后端处理。音色复刻会向云端上传 5–20 秒参考音频（推荐 10–20 秒），并发送配音文本；复刻、翻译与合成可能计费。音色相似度与背景分离效果取决于素材和服务，不保证完全保留。' : 'The full video is sent only to the local backend. Voice cloning uploads a 5–20 second reference clip (10–20 seconds recommended) to the cloud and sends dubbing text. Cloning, translation and synthesis may incur charges. Voice similarity and background separation depend on the source and service; exact preservation is not guaranteed.'}</p>
                 <label className="checkbox-field dubbing-consent"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{zh ? '我已获得参考声音的使用与复刻授权，同意上传 5–20 秒参考音频（推荐 10–20 秒）、发送文本并承担可能的费用。' : 'I am authorized to use and clone the reference voice and consent to uploading a 5–20 second reference clip (10–20 seconds recommended), text processing and possible charges.'}</label>
                 <div className="settings-actions"><button type="button" className="choose-file-button" disabled={!consent || !file || dirty} onClick={() => void run(true)}>{zh ? '前 30 秒内短片试听' : 'Preview first ≤30 seconds'}</button><button type="button" className="primary" disabled={!consent || !file || dirty} onClick={() => void run(false)}>{zh ? '生成完整配音' : 'Generate full dub'}</button></div>

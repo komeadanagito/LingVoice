@@ -16,6 +16,7 @@ import { TranslationService } from '../src/main/translation';
 import { TtsService } from '../src/main/tts';
 import { DubbingService } from '../src/main/dubbing';
 import { AsrService } from '../src/main/asr';
+import { LocalPluginManager } from '../src/main/local-plugins';
 import { createServerVault } from '../src/main/server-vault';
 import { filePathToMediaUrl } from '../src/renderer/utils/media';
 import { LocalizedError } from '../src/shared/i18n/translate';
@@ -119,28 +120,37 @@ export function browserBackend(options: BrowserBackendOptions = {}): Plugin {
       let speech: AsrService | undefined;
       let synthesis: TtsService | undefined;
       let dubbingService: DubbingService | undefined;
+      const broadcast = (payload: string) => {
+        for (const stream of streams) {
+          if (stream.destroyed || stream.writableEnded) { streams.delete(stream); continue; }
+          if (!stream.writableNeedDrain) stream.write(payload);
+        }
+      };
       const manager = new Downloader({
         dataDir, ffmpegPath,
-        emit: event => { for (const stream of streams) stream.write(`data: ${JSON.stringify(event)}\n\n`); },
+        emit: event => broadcast(`data: ${JSON.stringify(event)}\n\n`),
+      });
+      const localPlugins = new LocalPluginManager(undefined, progress => {
+        broadcast(`event: local-models-download-progress\ndata: ${JSON.stringify(progress)}\n\n`);
       });
       const services = (async () => {
         const vault = await createServerVault(dataDir);
         const providers = new ProviderService(path.join(dataDir, 'providers.json'), vault);
-        const translation = new TranslationService(path.join(dataDir, 'translation.json'), vault, providers);
-        const tts = new TtsService(path.join(dataDir, 'tts.json'), providers, vault);
+        const translation = new TranslationService(path.join(dataDir, 'translation.json'), vault, providers, localPlugins);
+        const tts = new TtsService(path.join(dataDir, 'tts.json'), providers, vault, localPlugins);
         synthesis = tts;
         const dubbing = new DubbingService({
           directory: path.join(dataDir, 'dubbing'), ffmpegPath,
           helperPath: await fs.access(path.join(__dirname, 'audio-separation.py'))
             .then(() => path.join(__dirname, 'audio-separation.py'))
             .catch(() => path.resolve(__dirname, '../../scripts/audio-separation.py')),
-          tts, translation,
-          emit: progress => { for (const stream of streams) stream.write(`event: dubbing-progress\ndata: ${JSON.stringify(progress)}\n\n`); },
+          tts, translation, localPlugins,
+          emit: progress => broadcast(`event: dubbing-progress\ndata: ${JSON.stringify(progress)}\n\n`),
         });
         dubbingService = dubbing;
         const asr = new AsrService(path.join(dataDir, 'asr.json'), vault, ffmpegPath, progress => {
-          for (const stream of streams) stream.write(`event: asr-progress\ndata: ${JSON.stringify(progress)}\n\n`);
-        }, {}, providers);
+          broadcast(`event: asr-progress\ndata: ${JSON.stringify(progress)}\n\n`);
+        }, { localPlugins }, providers);
         speech = asr;
         return { providers, translation, asr, tts, dubbing };
       })();
@@ -154,6 +164,7 @@ export function browserBackend(options: BrowserBackendOptions = {}): Plugin {
       }
       server.httpServer?.once('close', () => {
         manager.cancel(); speech?.cancel(); synthesis?.cancel(); dubbingService?.cancel();
+        void localPlugins.dispose();
         void historyReady.then(history => history.close()).catch(() => {});
         for (const stream of streams) stream.end();
         for (const token of uploads.keys()) void removeUpload(token).catch(() => {});
@@ -180,8 +191,14 @@ export function browserBackend(options: BrowserBackendOptions = {}): Plugin {
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
           res.write(': connected\n\n');
           streams.add(res);
-          const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15000);
-          req.on('close', () => { clearInterval(heartbeat); streams.delete(res); });
+          const sseHeartbeat = setInterval(() => {
+            if (res.destroyed || res.writableEnded) { cleanupSse(); return; }
+            if (!res.writableNeedDrain) res.write(': keep-alive\n\n');
+          }, 15000);
+          sseHeartbeat.unref();
+          const cleanupSse = () => { clearInterval(sseHeartbeat); streams.delete(res); };
+          req.on('close', cleanupSse);
+          res.on('close', cleanupSse);
           return;
         }
         if (route.startsWith('/media/') && ['GET', 'HEAD'].includes(req.method || '')) {
@@ -298,6 +315,28 @@ export function browserBackend(options: BrowserBackendOptions = {}): Plugin {
             case '/dubbing-check': result = await dubbing.check(); break;
             case '/dubbing-clear': await dubbing.clearCache(); break;
             case '/dubbing-delete-voice': await dubbing.deleteVoice(data.voiceId); break;
+            case '/local-models-status': result = await localPlugins.status(); break;
+            case '/local-models-stop': {
+              const target = data?.id;
+              if (target !== undefined && target !== 'asr' && target !== 'translation' && target !== 'voice-clone') {
+                throw new Error('Invalid local plugin identifier.');
+              }
+              result = await localPlugins.stop(target);
+              break;
+            }
+            case '/local-models-download': {
+              const target = data?.target;
+              if (target !== 'asr' && target !== 'translation' && target !== 'voice-clone' && target !== 'separation' && target !== 'all') {
+                throw new Error('Invalid download target.');
+              }
+              const source = data?.source === 'huggingface' ? 'huggingface' : 'modelscope';
+              result = await localPlugins.downloadModels({ target, source });
+              break;
+            }
+            case '/local-models-cancel-download': {
+              result = await localPlugins.cancelDownload();
+              break;
+            }
             case '/dubbing-cancel': {
               if (typeof data.jobId !== 'string') throw new Error('Invalid dubbing job.');
               dubbing.cancel(data.jobId); break;

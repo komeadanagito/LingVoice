@@ -54,7 +54,7 @@ app.whenReady().then(async () => {
       await pause(100);
     }
     assert.ok(window, 'Main window exists');
-    await waitFor(window, "!!document.getElementById('folder')?.textContent");
+    await waitFor(window, "!!document.getElementById('folder')?.textContent && !!document.querySelector('#right-sidebar .subtitle-toolbar')");
     const initial = await window.webContents.executeJavaScript(`({
       title: document.querySelector('h1').textContent,
       folder: document.getElementById('folder').textContent,
@@ -162,7 +162,7 @@ app.whenReady().then(async () => {
     // Exercise translation settings and subtitle playback without contacting any provider.
     await fixture.webContents.executeJavaScript("document.querySelector('.sidebar-settings').click()");
     await waitFor(fixture, "!!document.querySelector('.translation-fields') && !document.querySelector('.translation-fields').disabled");
-    assert.equal(await fixture.webContents.executeJavaScript("document.querySelectorAll('.settings-section').length"), 5);
+    assert.equal(await fixture.webContents.executeJavaScript("document.querySelectorAll('.settings-section').length"), 6);
     await fixture.webContents.executeJavaScript("document.querySelector('.translation-save').click()");
     await waitFor(fixture, "document.querySelector('.translation-section .settings-notice')?.textContent.includes('Settings saved')");
     await fixture.webContents.executeJavaScript("document.querySelector('.translation-test').click()");
@@ -207,27 +207,22 @@ app.whenReady().then(async () => {
     await fs.writeFile(path.join(artifacts, 'settings.png'), settingsScreenshot.toPNG());
     await fixture.webContents.executeJavaScript("document.querySelector('.nav-item').click()");
     await fixture.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.player-actions input[type=file]');
+      const input = document.querySelector('.video-player-card:not([hidden]) .player-actions input[type=file]');
       const data = new DataTransfer();
       data.items.add(new File(['offline fixture'], 'local-test.mp4', { type: 'video/mp4' }));
       input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await waitFor(fixture, "!!document.querySelector('video')");
+    await waitFor(fixture, "!!document.querySelector('.video-player-card:not([hidden]) video')");
+    await fixture.webContents.executeJavaScript("document.querySelector('.asr-start').click()");
+    await waitFor(fixture, "document.querySelector('.subtitle-hint')?.textContent.includes('transcription.srt')");
     await fixture.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.subtitle-toolbar input[type=file]');
-      const data = new DataTransfer();
-      data.items.add(new File(['1\\n00:00:00,000 --> 00:00:05,000\\nHello world'], 'example.srt', { type: 'text/plain' }));
-      input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await waitFor(fixture, "document.querySelector('.subtitle-hint')?.textContent.includes('example.srt')");
-    await fixture.webContents.executeJavaScript(`(() => {
-      const video = document.querySelector('video');
+      const video = document.querySelector('.video-player-card:not([hidden]) video');
       Object.defineProperty(video, 'currentTime', { configurable: true, value: 1 });
       video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
     })()`);
-    await waitFor(fixture, "document.querySelector('.subtitle-overlay')?.textContent.includes('Hello world')");
-    await fixture.webContents.executeJavaScript("document.querySelector('.subtitle-toolbar .primary').click()");
-    await waitFor(fixture, "document.querySelector('.subtitle-translation')?.textContent.includes('译文：Hello world')");
+    await waitFor(fixture, "document.querySelector('.subtitle-overlay')?.textContent.includes('Recognized speech')");
+    await fixture.webContents.executeJavaScript("document.querySelector('.subtitle-translate').click()");
+    await waitFor(fixture, "document.querySelector('.subtitle-translation')?.textContent.includes('译文：Recognized speech')");
     await fixture.webContents.executeJavaScript(`(() => {
       const select = document.querySelector('#right-sidebar .subtitle-select select');
       select.value = 'translated'; select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -241,13 +236,10 @@ app.whenReady().then(async () => {
     await fixture.webContents.executeJavaScript(`(() => {
       const select = document.querySelector('#right-sidebar .subtitle-select select');
       select.value = 'original'; select.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('.asr-start').click();
     })()`);
-    await waitFor(fixture, "!!document.querySelector('.asr-consent')");
-    await fixture.webContents.executeJavaScript("document.querySelector('.asr-confirm').click()");
-    await waitFor(fixture, "document.querySelector('.subtitle-overlay')?.textContent.includes('Recognized speech')");
-    console.log('PASS: ASR upload confirmation, provider task binding and generated timestamped subtitles (offline fixtures).');
-    console.log('PASS: grouped translation settings, configuration saving, SRT import, translation overlay and subtitle mode switching (offline fixtures).');
+    await waitFor(fixture, "!!document.querySelector('.subtitle-original') && !document.querySelector('.subtitle-translation')");
+    console.log('PASS: ASR transcription, provider task binding and generated timestamped subtitles (offline fixtures).');
+    console.log('PASS: grouped translation settings, configuration saving, subtitle translation overlay and mode switching (offline fixtures).');
     console.log('PASS: bilingual switching, persisted preferences, restored locale, document title/lang, live status and error translation.');
     console.log('PASS: real desktop startup, isolated typed bridge, backend URL validation and React error recovery.');
     console.log('PASS: React preview escaping, quality selection, progress, completion, cancellation and cookie invalidation (offline fixtures).');

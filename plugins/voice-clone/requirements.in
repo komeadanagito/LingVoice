@@ -1,0 +1,43 @@
+# Inference-only subset of upstream e91506f requirements; no training UI or ASR.
+numpy==1.26.4
+scipy
+matplotlib<4
+librosa==0.10.2
+numba
+pytorch-lightning>=2.4,<3
+torchmetrics<=1.5
+ffmpeg-python
+imageio-ffmpeg
+onnxruntime>=1.18,<2
+tqdm
+cn2an
+pypinyin
+# Drop-in pyopenjtalk module with CPython 3.10 Windows wheel; avoids MSVC long-path build failures.
+pyopenjtalk-plus==0.4.1.post10
+g2p_en
+sentencepiece
+transformers==4.51.3
+peft==0.17.1
+chardet
+PyYAML
+psutil
+jieba_fast
+jieba
+split-lang
+fast_langdetect>=0.3.1
+wordsegment
+rotary_embedding_torch
+ToJyutping
+g2pk2
+eunjeon; sys_platform == 'win32'
+ko_pron
+opencc
+fastapi>=0.115.2,<1
+uvicorn>=0.30,<1
+httpx>=0.27,<1
+x_transformers
+pydantic==2.10.6
+huggingface_hub<1
+soundfile
+resampy
+setuptools<81
