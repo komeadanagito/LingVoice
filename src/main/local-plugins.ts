@@ -111,6 +111,20 @@ async function hasVenvPackage(serviceDir: string, pkg: string): Promise<boolean>
   return false;
 }
 
+async function hasCudaTorch(serviceDir: string): Promise<boolean> {
+  if (!await hasVenvPackage(serviceDir, 'torch')) return false;
+  const versionPath = process.platform === 'win32'
+    ? path.join(serviceDir, '.venv', 'Lib', 'site-packages', 'torch', 'version.py')
+    : '';
+  if (versionPath && await isFile(versionPath)) {
+    try {
+      const content = await fs.readFile(versionPath, 'utf8');
+      if (content.includes('+cpu') || /cuda:\s*Optional\[str\]\s*=\s*None/.test(content)) return false;
+    } catch {}
+  }
+  return true;
+}
+
 async function isServiceDepsReady(pluginsDir: string, id: LocalPluginId | 'installer'): Promise<boolean> {
   const dir = path.join(pluginsDir, id);
   if (!await isFile(pythonExecutable(dir))) return false;
@@ -118,9 +132,9 @@ async function isServiceDepsReady(pluginsDir: string, id: LocalPluginId | 'insta
     return (await hasVenvPackage(dir, 'huggingface_hub')) && (await hasVenvPackage(dir, 'psutil'));
   }
   if (id === 'asr' || id === 'translation') {
-    return (await hasVenvPackage(dir, 'torch')) && (await hasVenvPackage(dir, 'transformers'));
+    return (await hasCudaTorch(dir)) && (await hasVenvPackage(dir, 'transformers'));
   }
-  return (await hasVenvPackage(dir, 'torch'))
+  return (await hasCudaTorch(dir))
     && (await hasVenvPackage(dir, 'imageio_ffmpeg'))
     && (await hasVenvPackage(dir, 'fast_langdetect'))
     && (await isFile(path.join(dir, 'upstream', 'tools', 'uvr5', 'bsroformer.py')));

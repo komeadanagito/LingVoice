@@ -48,11 +48,21 @@ if (Test-Path (Join-Path $upstream '.git')) {
 } elseif (!(Test-Path (Join-Path $upstream 'tools/uvr5/bsroformer.py'))) {
   throw 'Upstream GPT-SoVITS source is incomplete.'
 }
-& $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu126 'torch==2.6.0+cu126' 'torchaudio==2.6.0+cu126'
-if ($LASTEXITCODE -ne 0) { throw 'PyTorch CUDA wheels installation failed.' }
+$env:UV_DEFAULT_INDEX = $null
+$env:UV_INDEX_URL = $null
+$env:UV_HTTP_TIMEOUT = '300'
+$pypiIndex = if ($env:LINGVOICE_PYPI_INDEX) { $env:LINGVOICE_PYPI_INDEX } else { 'https://pypi.org/simple/' }
+& $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu126 --extra-index-url $pypiIndex --index-strategy unsafe-best-match 'torch==2.6.0+cu126' 'torchaudio==2.6.0+cu126'
+if ($LASTEXITCODE -ne 0) {
+  # Fallback to Aliyun direct PyTorch wheel mirror if download.pytorch.org is unreachable or timed out.
+  & $uv pip install --python $python --index-url $pypiIndex `
+    'https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-win_amd64.whl' `
+    'https://mirrors.aliyun.com/pytorch-wheels/cu126/torchaudio-2.6.0%2Bcu126-cp310-cp310-win_amd64.whl'
+  if ($LASTEXITCODE -ne 0) { throw 'PyTorch CUDA wheels installation failed.' }
+}
 $lock = Join-Path $root 'requirements.lock'
 $requirements = if ((Test-Path $lock) -and !$RefreshLock) { $lock } else { Join-Path $root 'requirements.in' }
-& $uv pip install --python $python -r $requirements --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match
+& $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match -r $requirements
 if ($LASTEXITCODE -ne 0) { throw 'Inference dependencies installation failed.' }
 & $uv pip check --python $python
 if ($LASTEXITCODE -ne 0) { throw 'Dependency validation failed.' }

@@ -18,13 +18,19 @@ $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 if ($Source -eq 'modelscope') {
     $env:UV_PYTHON_INSTALL_MIRROR = 'https://registry.npmmirror.com/-/binary/python-build-standalone'
-    $env:UV_DEFAULT_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
+    $env:LINGVOICE_PYPI_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
 }
+$env:UV_DEFAULT_INDEX = $null
+$env:UV_INDEX_URL = $null
+$env:UV_HTTP_TIMEOUT = '300'
 $services = if ($Service -eq 'all') { @('asr','translation','voice-clone') } else { @($Service) }
 if ($Action -eq 'bootstrap' -or $Action -eq 'install') {
     & (Join-Path $root 'bootstrap.ps1') -Source $Source
     if (!$?) { throw 'Bootstrap failed.' }
-    & $uv pip install --python $installer 'huggingface-hub==1.33.0' 'psutil==7.2.2'
+    $installerArgs = @('pip', 'install', '--python', $installer)
+    if ($env:LINGVOICE_PYPI_INDEX) { $installerArgs += @('--index-url', $env:LINGVOICE_PYPI_INDEX) }
+    $installerArgs += @('huggingface-hub==1.33.0', 'psutil==7.2.2')
+    & $uv @installerArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer dependencies failed.' }
     if ($Action -eq 'bootstrap') { exit 0 }
 }

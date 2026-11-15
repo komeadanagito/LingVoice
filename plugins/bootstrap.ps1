@@ -18,8 +18,11 @@ $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP
 if ($Source -eq 'modelscope') {
     $env:UV_PYTHON_INSTALL_MIRROR = 'https://registry.npmmirror.com/-/binary/python-build-standalone'
-    $env:UV_DEFAULT_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
+    $env:LINGVOICE_PYPI_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
 }
+$env:UV_DEFAULT_INDEX = $null
+$env:UV_INDEX_URL = $null
+$env:UV_HTTP_TIMEOUT = '300'
 [IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
 $uv = Join-Path $tools 'uv.exe'
 if (!(Test-Path $uv)) {

@@ -16,16 +16,20 @@ try {
         $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
         [Environment]::SetEnvironmentVariable($name, $values[$name], 'Process')
     }
+    $env:UV_DEFAULT_INDEX = $null
+    $env:UV_INDEX_URL = $null
+    $env:UV_HTTP_TIMEOUT = '300'
+    $pypiIndex = if ($env:LINGVOICE_PYPI_INDEX) { $env:LINGVOICE_PYPI_INDEX } else { 'https://pypi.org/simple/' }
     New-Item -ItemType Directory -Force -Path "$root\cache\uv", "$root\tmp", "$root\inputs", "$root\outputs" | Out-Null
     if (!(Test-Path $python)) { throw 'Create the plugin Python 3.12 venv first.' }
-    if ($UseLock) {
+    if ($UseLock -or (Test-Path "$root\requirements.lock.txt")) {
         if (!(Test-Path "$root\requirements.lock.txt")) { throw 'No validated lock exists. Run install.ps1 first.' }
-        & $uv pip sync --python $python --extra-index-url https://download.pytorch.org/whl/cu128 "$root\requirements.lock.txt"
+        & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match -r "$root\requirements.lock.txt"
         if ($LASTEXITCODE) { throw 'Locked dependency installation failed.' }
     } else {
-        & $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu128 'torch==2.10.0' 'torchaudio==2.10.0'
+        & $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu128 --extra-index-url $pypiIndex --index-strategy unsafe-best-match 'torch==2.10.0+cu128' 'torchaudio==2.10.0+cu128'
         if ($LASTEXITCODE) { throw 'CUDA torch/torchaudio installation failed.' }
-        & $uv pip install --python $python --only-binary :all: -r "$root\requirements.in"
+        & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match --only-binary :all: -r "$root\requirements.in"
         if ($LASTEXITCODE) { throw 'Dependency installation failed.' }
     }
     & $uv pip check --python $python
