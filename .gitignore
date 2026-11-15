@@ -21,6 +21,7 @@ docs/
 
 # Local model plugins: keep scripts/configuration, exclude machine-specific artifacts.
 plugins/runtime/
+plugins/.download.lock
 plugins/**/.venv/
 plugins/**/models/
 plugins/**/cache/

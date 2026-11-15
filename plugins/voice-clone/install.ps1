@@ -1,75 +1,81 @@
-param([switch]$SkipModels, [switch]$RefreshLock, [switch]$NoModels)
+param(
+    [switch]$SkipModels, [switch]$RefreshLock, [switch]$NoModels,
+    [ValidateSet('modelscope','huggingface')][string]$Source = 'modelscope',
+    [ValidateSet('cuda','cpu')][string]$Device = 'cuda'
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+. (Join-Path (Split-Path $root -Parent) 'install-common.ps1')
+Initialize-LingVoiceInstall -Root (Split-Path $root -Parent) -Source $Source
 $python = Join-Path $root '.venv/Scripts/python.exe'
 $uv = Join-Path $root '../runtime/tools/uv.exe'
-if (!(Test-Path $python) -or !(Test-Path $uv)) { throw 'Run plugins/bootstrap.ps1 first (project Python 3.10 required).' }
-$env:UV_CACHE_DIR = Join-Path $root 'cache/uv'
-$env:PIP_CACHE_DIR = Join-Path $root 'cache/pip'
-$env:TEMP = Join-Path $root 'tmp'
-$env:TMP = $env:TEMP
-$env:PYTHONNOUSERSITE = '1'
-$env:PYTHONPATH = $null
-$env:PYTHONHOME = $null
-[IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
+Assert-LingVoicePython -Python $python -Version '3.10'
+if (!(Test-Path -LiteralPath $uv)) { throw 'Run plugins/bootstrap.ps1 first.' }
 $upstream = Join-Path $root 'upstream'
 $revision = 'e91506f1fba265e1841617c3042a1573206a7351'
-if (!(Test-Path (Join-Path $upstream 'tools/uvr5/bsroformer.py'))) {
-  if (Test-Path $upstream) { Remove-Item -Recurse -Force $upstream -ErrorAction SilentlyContinue }
-  $cloned = $false
-  $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-  if ($gitCmd) {
+$marker = Join-Path $upstream '.lingvoice-source-revision'
+$requiredSource = @('tools/uvr5/bsroformer.py','GPT_SoVITS/TTS_infer_pack/TTS.py')
+$complete = $true
+foreach ($relative in $requiredSource) { if (!(Test-Path -LiteralPath (Join-Path $upstream $relative))) { $complete = $false } }
+$verifiedSource = $false
+if ($complete -and (Test-Path -LiteralPath (Join-Path $upstream '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $actual = (Invoke-LingVoiceNative 'git' @('-C',$upstream,'rev-parse','HEAD')) -join ''
+    if ($actual.Trim() -ne $revision) { throw 'Upstream revision mismatch. Existing source/models are preserved; select the pinned checkout manually.' }
+    $trackedChanges = (Invoke-LingVoiceNative 'git' @('-C',$upstream,'status','--porcelain','--untracked-files=no')) -join ''
+    if ($trackedChanges.Trim()) { throw 'Pinned upstream has tracked local modifications; refusing to silently use changed source. Existing files were preserved.' }
+    $verifiedSource = $true
+} elseif ($complete -and (Test-Path -LiteralPath $marker)) {
+    $verifiedSource = ([IO.File]::ReadAllText($marker).Trim() -eq $revision)
+    if (!$verifiedSource) { throw 'Upstream source marker mismatch; existing source/models were preserved.' }
+}
+if (!$verifiedSource) {
+    # Download into an independent staging directory. Never recursively delete upstream:
+    # it also contains downloaded model weights and runtime language resources.
+    $stage = Join-Path $env:TEMP ('src-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    [IO.Directory]::CreateDirectory($stage) | Out-Null
     try {
-      & git clone --filter=blob:none --no-checkout https://github.com/RVC-Boss/GPT-SoVITS.git $upstream
-      if ($LASTEXITCODE -eq 0) {
-        & git -C $upstream checkout $revision
-        if ($LASTEXITCODE -eq 0) { $cloned = $true }
-      }
-    } catch {}
-  }
-  if (!$cloned) {
-    if (Test-Path $upstream) { Remove-Item -Recurse -Force $upstream -ErrorAction SilentlyContinue }
-    $archiveZip = Join-Path $env:TEMP "GPT-SoVITS-$revision.zip"
-    $extractTmp = Join-Path $env:TEMP "GPT-SoVITS-extract-$revision"
-    if (Test-Path $extractTmp) { Remove-Item -Recurse -Force $extractTmp }
-    & curl.exe --fail --location --retry 4 --connect-timeout 30 --output $archiveZip "https://github.com/RVC-Boss/GPT-SoVITS/archive/$revision.zip"
-    if ($LASTEXITCODE -ne 0) { throw 'Official GPT-SoVITS source download failed.' }
-    Expand-Archive -LiteralPath $archiveZip -DestinationPath $extractTmp -Force
-    $inner = Get-ChildItem -Path $extractTmp -Directory | Select-Object -First 1
-    if (!$inner) { throw 'Extracted GPT-SoVITS source archive is empty.' }
-    Move-Item -LiteralPath $inner.FullName -Destination $upstream
-    Remove-Item -Force $archiveZip -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $extractTmp -ErrorAction SilentlyContinue
-  }
+        $archive = Join-Path $stage 'source.zip'
+        try { Receive-LingVoiceFile -Uri "https://codeload.github.com/RVC-Boss/GPT-SoVITS/zip/$revision" -Destination $archive }
+        catch { Receive-LingVoiceFile -Uri "https://github.com/RVC-Boss/GPT-SoVITS/archive/$revision.zip" -Destination $archive }
+        # Strip the archive's long top-level directory to keep paths usable in
+        # Windows PowerShell 5.1; explicit stream extraction fails on every error.
+        $sourceRoot = Join-Path $stage 'x'
+        Expand-LingVoiceSourceArchive -Archive $archive -Destination $sourceRoot -RootName "GPT-SoVITS-$revision"
+        foreach ($relative in $requiredSource) {
+            if (!(Test-Path -LiteralPath (Join-Path $sourceRoot $relative))) { throw "Incomplete pinned source archive: $relative" }
+        }
+        $files = @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force)
+        # Validate all collisions before writing anything. A conflicting local source
+        # file requires human review, not a destructive checkout or model deletion.
+        foreach ($file in $files) {
+            $relative = $file.FullName.Substring($sourceRoot.Length + 1)
+            $destination = Join-Path $upstream $relative
+            if (Test-Path -LiteralPath $destination) {
+                if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+                    throw "Pinned source conflicts with existing file: $destination. No source/model files were overwritten."
+                }
+            }
+        }
+        foreach ($file in $files) {
+            $relative = $file.FullName.Substring($sourceRoot.Length + 1)
+            $destination = Join-Path $upstream $relative
+            if (!(Test-Path -LiteralPath $destination)) {
+                [IO.Directory]::CreateDirectory((Split-Path $destination -Parent)) | Out-Null
+                Copy-Item -LiteralPath $file.FullName -Destination $destination
+            }
+        }
+        [IO.File]::WriteAllText($marker, $revision, [Text.UTF8Encoding]::new($false))
+    } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 }
-if (Test-Path (Join-Path $upstream '.git')) {
-  $actual = & git -C $upstream rev-parse HEAD
-  if ($actual -ne $revision) { throw 'Upstream revision mismatch; refusing a silent model/API change.' }
-} elseif (!(Test-Path (Join-Path $upstream 'tools/uvr5/bsroformer.py'))) {
-  throw 'Upstream GPT-SoVITS source is incomplete.'
-}
-$env:UV_DEFAULT_INDEX = $null
-$env:UV_INDEX_URL = $null
-$env:UV_HTTP_TIMEOUT = '300'
-$pypiIndex = if ($env:LINGVOICE_PYPI_INDEX) { $env:LINGVOICE_PYPI_INDEX } else { 'https://pypi.org/simple/' }
-& $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu126 --extra-index-url $pypiIndex --index-strategy unsafe-best-match 'torch==2.6.0+cu126' 'torchaudio==2.6.0+cu126'
-if ($LASTEXITCODE -ne 0) {
-  # Fallback to Aliyun direct PyTorch wheel mirror if download.pytorch.org is unreachable or timed out.
-  & $uv pip install --python $python --index-url $pypiIndex `
-    'https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-win_amd64.whl' `
-    'https://mirrors.aliyun.com/pytorch-wheels/cu126/torchaudio-2.6.0%2Bcu126-cp310-cp310-win_amd64.whl'
-  if ($LASTEXITCODE -ne 0) { throw 'PyTorch CUDA wheels installation failed.' }
-}
+$channel = if ($Device -eq 'cpu') { 'cpu' } else { 'cu126' }
 $lock = Join-Path $root 'requirements.lock'
-$requirements = if ((Test-Path $lock) -and !$RefreshLock) { $lock } else { Join-Path $root 'requirements.in' }
-& $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match -r $requirements
-if ($LASTEXITCODE -ne 0) { throw 'Inference dependencies installation failed.' }
-& $uv pip check --python $python
-if ($LASTEXITCODE -ne 0) { throw 'Dependency validation failed.' }
+$requirements = if ((Test-Path -LiteralPath $lock) -and !$RefreshLock) { $lock } else { Join-Path $root 'requirements.in' }
+Install-LingVoicePackages -Uv $uv -Python $python -Requirements $requirements -Channel $channel -PythonTag 'cp310' -TorchPackages @("torch==2.6.0+$channel", "torchaudio==2.6.0+$channel")
+# Required even with -NoModels: pip metadata checks do not load native DLLs.
+Invoke-LingVoiceNative $python @('-I','-c',"import sys; sys.path.insert(0,sys.argv[1]); import torch,torchaudio,numpy,scipy,librosa,soundfile,onnxruntime,transformers,peft,pyopenjtalk,jieba_fast,eunjeon,fastapi; from transformers import BertModel, AutoModelForMaskedLM; from tools.uvr5.bsroformer import Roformer_Loader; assert torch.__version__ == '2.6.0+$channel'; assert torchaudio.__version__ == '2.6.0+$channel'",$upstream)
 if (!$NoModels) {
-  & $python (Join-Path $root 'prepare_models.py') $(if ($SkipModels) { '--runtime-only' })
-  if ($LASTEXITCODE -ne 0) { throw 'Model/runtime preparation failed.' }
+    $prepareArgs = @((Join-Path $root 'prepare_models.py'),'--source',$Source)
+    if ($SkipModels) { $prepareArgs += '--runtime-only' }
+    Invoke-LingVoiceNative $python $prepareArgs
 }
-# Lock only a completely installed environment, never a guessed dependency set.
-& $uv pip freeze --python $python | Set-Content -Encoding UTF8 $lock
-if ($LASTEXITCODE -ne 0) { throw 'Environment lock failed.' }
+Write-LingVoiceLock -Uv $uv -Python $python -Path $lock

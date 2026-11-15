@@ -140,23 +140,36 @@ async function isServiceDepsReady(pluginsDir: string, id: LocalPluginId | 'insta
     && (await isFile(path.join(dir, 'upstream', 'tools', 'uvr5', 'bsroformer.py')));
 }
 
+async function manifestFilesReady(directory: string, manifestName: string, requireComplete: boolean): Promise<boolean> {
+  try {
+    const data = JSON.parse(await fs.readFile(path.join(directory, manifestName), 'utf8'));
+    if (requireComplete && data.complete !== true) return false;
+    const entries = Array.isArray(data) ? data : data.files;
+    if (!Array.isArray(entries) || !entries.length) return false;
+    for (const entry of entries) {
+      const name = entry.name ?? entry.destination;
+      const size = entry.size ?? entry.bytes;
+      if (typeof name !== 'string' || !Number.isSafeInteger(size) || size <= 0) return false;
+      const file = path.resolve(directory, name);
+      if (!file.startsWith(path.resolve(directory) + path.sep)) return false;
+      const stat = await fs.stat(file);
+      if (!stat.isFile() || stat.size !== size) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
 async function checkWeights(pluginsDir: string, id: LocalPluginId): Promise<boolean> {
   const dir = path.join(pluginsDir, id);
-  try {
-    if (id === 'asr') {
-      return (await isFile(path.join(dir, 'models', 'qwen3-asr-1.7b', 'config.json')))
-        && (await isFile(path.join(dir, 'models', 'qwen3-forced-aligner-0.6b', 'config.json')));
-    }
-    if (id === 'translation') {
-      const manifestPath = path.join(dir, 'models', 'gemma-4-e2b-it', 'download-manifest.json');
-      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as { complete?: unknown };
-      return manifest.complete === true && await isFile(path.join(dir, 'models', 'gemma-4-e2b-it', 'model.safetensors'));
-    }
-    return (await isFile(path.join(dir, 'models.verified.json')))
-      && (await isFile(path.join(dir, 'runtime.manifest.json')));
-  } catch {
-    return false;
+  if (id === 'asr') {
+    return await manifestFilesReady(path.join(dir, 'models', 'qwen3-asr-1.7b'), 'download-manifest.json', true)
+      && await manifestFilesReady(path.join(dir, 'models', 'qwen3-forced-aligner-0.6b'), 'download-manifest.json', true);
   }
+  if (id === 'translation') {
+    return manifestFilesReady(path.join(dir, 'models', 'gemma-4-e2b-it'), 'download-manifest.json', true);
+  }
+  return await manifestFilesReady(dir, 'models.verified.json', false)
+    && await manifestFilesReady(dir, 'runtime.manifest.json', false);
 }
 
 function buildIsolatedEnv(pluginsDir: string, id: LocalPluginId): NodeJS.ProcessEnv {
@@ -269,6 +282,8 @@ export class LocalPluginManager {
   private transition: Promise<void> = Promise.resolve();
   private downloadChild: ChildProcess | null = null;
   private downloadCancelRequested = false;
+  private downloadTask: Promise<void> | null = null;
+  private downloadLog: string | undefined;
   private onDownloadProgress?: (progress: LocalModelDownloadProgress) => void;
   private downloadState: LocalModelDownloadProgress = {
     active: false,
@@ -642,6 +657,10 @@ export class LocalPluginManager {
     delete env.HF_HUB_OFFLINE;
     delete env.TRANSFORMERS_OFFLINE;
     delete env.HF_DATASETS_OFFLINE;
+    delete env.UV_DEFAULT_INDEX;
+    delete env.UV_INDEX_URL;
+    delete env.LINGVOICE_PYPI_INDEX;
+    delete env.UV_PYTHON_INSTALL_MIRROR;
     env.PYTHONNOUSERSITE = '1';
     env.PYTHONUTF8 = '1';
     env.PYTHONIOENCODING = 'utf-8';
@@ -667,27 +686,35 @@ export class LocalPluginManager {
       });
       this.downloadChild = child;
       const tail: string[] = [];
-      let remainder = '';
-      const pushChunk = (chunk: Buffer) => {
-        const text = remainder + chunk.toString('utf8');
-        const parts = text.split(/\r?\n/);
-        remainder = parts.pop() ?? '';
-        for (const raw of parts) {
-          const line = raw.trim();
-          if (!line) continue;
-          tail.push(line);
-          if (tail.length > 12) tail.shift();
-          onLine(line);
+      const remainders = { stdout: '', stderr: '' };
+      let logQueue = Promise.resolve();
+      const recordLine = (raw: string) => {
+        const line = raw.trim().slice(0, 8000);
+        if (!line) return;
+        tail.push(line);
+        if (tail.length > 150) tail.shift();
+        if (this.downloadLog) {
+          const file = this.downloadLog;
+          logQueue = logQueue.then(() => fs.appendFile(file, `${line}\n`, 'utf8')).catch(() => {});
         }
+        onLine(line);
       };
-      child.stdout?.on('data', pushChunk);
-      child.stderr?.on('data', pushChunk);
+      const pushChunk = (channel: 'stdout' | 'stderr', chunk: Buffer) => {
+        const text = remainders[channel] + chunk.toString('utf8');
+        const parts = text.split(/[\r\n]+/);
+        remainders[channel] = (parts.pop() ?? '').slice(-16000);
+        for (const raw of parts) recordLine(raw);
+      };
+      child.stdout?.on('data', chunk => pushChunk('stdout', chunk));
+      child.stderr?.on('data', chunk => pushChunk('stderr', chunk));
       child.once('error', err => {
         if (this.downloadChild === child) this.downloadChild = null;
         reject(err);
       });
-      child.once('exit', code => {
-        if (remainder.trim()) onLine(remainder.trim());
+      child.once('close', async code => {
+        recordLine(remainders.stdout);
+        recordLine(remainders.stderr);
+        await logQueue;
         if (this.downloadChild === child) this.downloadChild = null;
         if (this.downloadCancelRequested) {
           reject(new Error('下载已取消。'));
@@ -695,27 +722,45 @@ export class LocalPluginManager {
         }
         if (code === 0) resolve();
         else {
-          const cleanTail = tail.filter(l => !/^(\+\s*~+|At\s+.+:\d+\s+char:|所在位置\s+|标记:|CategoryInfo\s*:|FullyQualifiedErrorId\s*:)/i.test(l));
-          const summary = (cleanTail.length ? cleanTail : tail).slice(-3).join(' | ');
-          reject(new Error(summary || `下载命令退出码 ${code}`));
+          const diagnostic = tail.filter(line => /error:|cause:|failed to|no solution|no space|access.*denied|timed? out|certificate|403|401|429/i.test(line) && !/^\s*\+/.test(line));
+          const summary = (diagnostic.length ? diagnostic : tail.filter(line => !/^\+|CategoryInfo|FullyQualifiedErrorId|^At\s/i.test(line))).slice(-5).join(' | ');
+          reject(new Error((summary || `下载命令退出码 ${code}`) + (this.downloadLog ? `\n完整日志：${this.downloadLog}` : '')));
         }
       });
     });
   }
 
+  private async probeDownloadDependencies(id: LocalPluginId | 'installer'): Promise<boolean> {
+    if (this.downloadCancelRequested) throw new Error('下载已取消。');
+    if (!await isServiceDepsReady(this.pluginsDir, id)) return false;
+    const imports = id === 'installer' ? 'import huggingface_hub, psutil'
+      : id === 'asr' ? 'import torch, torchaudio, transformers, soundfile; from transformers import AutoModel'
+      : id === 'translation' ? 'import torch, transformers, bitsandbytes, accelerate; from transformers import AutoModelForCausalLM'
+      : 'import torch, torchaudio, imageio_ffmpeg, fast_langdetect, librosa, soundfile, onnxruntime; from transformers import BertModel';
+    return new Promise(resolve => {
+      const child = spawn(pythonExecutable(path.join(this.pluginsDir, id)), ['-I', '-c', imports], {
+        windowsHide: true, stdio: 'ignore', env: { ...this.buildDownloadEnv(), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1' },
+      });
+      this.downloadChild = child;
+      const timer = setTimeout(() => { child.kill(); resolve(false); }, 60_000);
+      child.once('error', () => { clearTimeout(timer); if (this.downloadChild === child) this.downloadChild = null; resolve(false); });
+      child.once('close', code => { clearTimeout(timer); if (this.downloadChild === child) this.downloadChild = null; resolve(code === 0); });
+    });
+  }
+
   private async ensureDownloadEnvironment(target: LocalEngineDownloadTarget, source: ModelDownloadSource): Promise<void> {
     const servicesToInstall: LocalPluginId[] = [];
-    if ((target === 'all' || target === 'asr') && !await isServiceDepsReady(this.pluginsDir, 'asr')) {
+    if ((target === 'all' || target === 'asr') && !await this.probeDownloadDependencies('asr')) {
       servicesToInstall.push('asr');
     }
-    if ((target === 'all' || target === 'translation') && !await isServiceDepsReady(this.pluginsDir, 'translation')) {
+    if ((target === 'all' || target === 'translation') && !await this.probeDownloadDependencies('translation')) {
       servicesToInstall.push('translation');
     }
     // Separation runs Karaoke BS-RoFormer inside the voice-clone venv and upstream uvr5 package.
-    if ((target === 'all' || target === 'voice-clone' || target === 'separation') && !await isServiceDepsReady(this.pluginsDir, 'voice-clone')) {
+    if ((target === 'all' || target === 'voice-clone' || target === 'separation') && !await this.probeDownloadDependencies('voice-clone')) {
       servicesToInstall.push('voice-clone');
     }
-    const needInstaller = !await isServiceDepsReady(this.pluginsDir, 'installer');
+    const needInstaller = !await this.probeDownloadDependencies('installer');
     if (!needInstaller && servicesToInstall.length === 0) return;
 
     const psScript = path.join(this.pluginsDir, 'plugins.ps1');
@@ -749,7 +794,7 @@ export class LocalPluginManager {
     if (!request || !validTargets.includes(request.target) || !validSources.includes(request.source)) {
       throw new Error('无效的模型下载参数。');
     }
-    if (this.downloadState.active) {
+    if (this.downloadState.active || this.downloadTask) {
       throw new Error('已有模型下载任务正在进行，请等待完成或先取消。');
     }
     if (!existsSync(path.join(this.pluginsDir, 'manage.py'))) {
@@ -770,8 +815,31 @@ export class LocalPluginManager {
       error: undefined,
     });
 
-    void (async () => {
+    this.downloadTask = (async () => {
+      let installationLock: fs.FileHandle | undefined;
+      const lockPath = path.join(this.pluginsDir, '.download.lock');
       try {
+        try {
+          installationLock = await fs.open(lockPath, 'wx');
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          const pid = Number(await fs.readFile(lockPath, 'utf8'));
+          if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('下载锁尚未初始化，请稍后重试。');
+          let running = true;
+          try { process.kill(pid, 0); } catch (error) { running = (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+          if (running) throw new Error('另一个应用或浏览器后端正在安装模型，请等待或关闭该实例后重试。');
+          await fs.unlink(lockPath);
+          installationLock = await fs.open(lockPath, 'wx');
+        }
+        await installationLock.writeFile(String(process.pid));
+        const logDir = path.join(this.pluginsDir, 'logs');
+        await fs.mkdir(logDir, { recursive: true });
+        this.downloadLog = path.join(logDir, `download-${Date.now()}.log`);
+        await fs.writeFile(this.downloadLog, `target=${request.target} source=${request.source}\n`, 'utf8');
+        const disk = await fs.statfs(this.pluginsDir);
+        if (disk.bavail * disk.bsize < 5 * 1024 ** 3) {
+          throw new Error('安装目录所在磁盘剩余空间不足 5 GiB，请释放空间后重试。完整安装通常需要数十 GB。');
+        }
         await this.ensureDownloadEnvironment(request.target, request.source);
         const installerPy = pythonExecutable(path.join(this.pluginsDir, 'installer'));
         const downloadScript = path.join(this.pluginsDir, 'download_models.py');
@@ -807,7 +875,7 @@ export class LocalPluginManager {
                 this.emitDownload({ totalFiles: stepFilesTotal, completedFiles: stepFilesDone });
                 return;
               }
-              const fileMatch = line.match(/^FILE OK\s+\S+\s+(\S+)\s+\d+\s+\((\d+)\/(\d+)\)/);
+              const fileMatch = line.match(/^FILE OK\s+\S+\s+(\S+)\s+(?:\d+\s+)?\((\d+)\/(\d+)\)/);
               if (fileMatch) {
                 stepFilesDone = Number(fileMatch[2]);
                 stepFilesTotal = Number(fileMatch[3]);
@@ -875,6 +943,12 @@ export class LocalPluginManager {
           message: msg,
           error: this.downloadCancelRequested ? undefined : msg,
         });
+      } finally {
+        if (installationLock) {
+          await installationLock.close().catch(() => {});
+          await fs.unlink(lockPath).catch(() => {});
+        }
+        this.downloadTask = null;
       }
     })();
 
@@ -882,16 +956,21 @@ export class LocalPluginManager {
   }
 
   async cancelDownload(): Promise<LocalModelsStatus> {
+    if (!this.downloadState.active && !this.downloadTask) return this.status();
     this.downloadCancelRequested = true;
+    this.emitDownload({ stage: 'cancelling', message: '正在停止下载进程，保留已下载文件…' });
     const child = this.downloadChild;
     if (child?.pid) {
       await this.killPid(child.pid);
     }
+    // Keep ownership until the old workflow has stopped; an immediate retry must
+    // never reset its cancellation flag or allow two writers into the same model.
+    await this.downloadTask;
     this.downloadChild = null;
     this.emitDownload({
       active: false,
       stage: 'cancelled',
-      message: '已取消模型下载。',
+      message: '已取消模型下载，已下载文件会在下次重试时复用。',
       error: undefined,
     });
     return this.status();

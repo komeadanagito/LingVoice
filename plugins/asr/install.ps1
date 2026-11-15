@@ -1,44 +1,23 @@
-param([switch]$UseLock)
+param(
+    [switch]$UseLock,
+    [switch]$RefreshLock,
+    [ValidateSet('modelscope','huggingface')][string]$Source = 'modelscope',
+    [ValidateSet('cuda','cpu')][string]$Device = 'cuda'
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$python = Join-Path $root '.venv\Scripts\python.exe'
-$uv = [IO.Path]::GetFullPath((Join-Path $root '..\runtime\tools\uv.exe'))
-# Changes apply to this script's children only and are restored in finally.
-$values = @{
-    PYTHONNOUSERSITE='1'; PYTHONPATH=$null; PYTHONHOME=$null;
-    UV_CACHE_DIR=(Join-Path $root 'cache\uv'); HF_HOME=(Join-Path $root 'cache\huggingface');
-    XDG_CACHE_HOME=(Join-Path $root 'cache'); TORCH_HOME=(Join-Path $root 'cache\torch');
-    TEMP=(Join-Path $root 'tmp'); TMP=(Join-Path $root 'tmp')
-}
-$previous = @{}
-try {
-    foreach ($name in $values.Keys) {
-        $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        [Environment]::SetEnvironmentVariable($name, $values[$name], 'Process')
-    }
-    $env:UV_DEFAULT_INDEX = $null
-    $env:UV_INDEX_URL = $null
-    $env:UV_HTTP_TIMEOUT = '300'
-    $pypiIndex = if ($env:LINGVOICE_PYPI_INDEX) { $env:LINGVOICE_PYPI_INDEX } else { 'https://pypi.org/simple/' }
-    New-Item -ItemType Directory -Force -Path "$root\cache\uv", "$root\tmp", "$root\inputs", "$root\outputs" | Out-Null
-    if (!(Test-Path $python)) { throw 'Create the plugin Python 3.12 venv first.' }
-    if ($UseLock -or (Test-Path "$root\requirements.lock.txt")) {
-        if (!(Test-Path "$root\requirements.lock.txt")) { throw 'No validated lock exists. Run install.ps1 first.' }
-        & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match -r "$root\requirements.lock.txt"
-        if ($LASTEXITCODE) { throw 'Locked dependency installation failed.' }
-    } else {
-        & $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu128 --extra-index-url $pypiIndex --index-strategy unsafe-best-match 'torch==2.10.0+cu128' 'torchaudio==2.10.0+cu128'
-        if ($LASTEXITCODE) { throw 'CUDA torch/torchaudio installation failed.' }
-        & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match --only-binary :all: -r "$root\requirements.in"
-        if ($LASTEXITCODE) { throw 'Dependency installation failed.' }
-    }
-    & $uv pip check --python $python
-    if ($LASTEXITCODE) { throw 'Dependency check failed; no lock will be generated.' }
-    & $python -I "$root\server.py" check --dependencies-only
-    if ($LASTEXITCODE) { throw 'Native model imports failed; no lock will be generated.' }
-    $lock = & $uv pip freeze --python $python
-    if ($LASTEXITCODE) { throw 'Dependency freeze failed.' }
-    [IO.File]::WriteAllLines((Join-Path $root 'requirements.lock.txt'), $lock, [Text.UTF8Encoding]::new($false))
-} finally {
-    foreach ($name in $previous.Keys) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
-}
+. (Join-Path (Split-Path $root -Parent) 'install-common.ps1')
+Initialize-LingVoiceInstall -Root (Split-Path $root -Parent) -Source $Source
+$python = Join-Path $root '.venv/Scripts/python.exe'
+$uv = Join-Path (Split-Path $root -Parent) 'runtime/tools/uv.exe'
+Assert-LingVoicePython -Python $python -Version '3.12'
+foreach ($dir in @('inputs','outputs')) { [IO.Directory]::CreateDirectory((Join-Path $root $dir)) | Out-Null }
+$lock = Join-Path $root 'requirements.lock.txt'
+if ($UseLock -and $RefreshLock) { throw 'UseLock and RefreshLock cannot be combined.' }
+if ($UseLock -and !(Test-Path -LiteralPath $lock)) { throw 'No validated lock exists. Run install.ps1 without -UseLock first.' }
+$requirements = if (!$RefreshLock -and (Test-Path -LiteralPath $lock)) { $lock } else { Join-Path $root 'requirements.in' }
+$channel = if ($Device -eq 'cpu') { 'cpu' } else { 'cu128' }
+Install-LingVoicePackages -Uv $uv -Python $python -Requirements $requirements -Channel $channel -TorchPackages @("torch==2.10.0+$channel", "torchaudio==2.10.0+$channel")
+Invoke-LingVoiceNative $python @('-I','-c',"import torch,torchaudio; assert torch.__version__ == '2.10.0+$channel'; assert torchaudio.__version__ == '2.10.0+$channel'")
+Invoke-LingVoiceNative $python @('-I',(Join-Path $root 'server.py'),'check','--dependencies-only')
+Write-LingVoiceLock -Uv $uv -Python $python -Path $lock

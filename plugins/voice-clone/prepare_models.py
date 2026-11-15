@@ -5,12 +5,22 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import urllib.request
+import urllib.parse
+import re
+import sys
+import time
 import zipfile
+
+# Both installers use the same range/retry/hash-before-replace implementation.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from download_models import (atomic_json, safe_path, download_url_resumable,
+                             valid_file, request_json)
 from local_runtime import ROOT, UPSTREAM, SOURCE_REVISION, configure
 
 MANIFEST = ROOT / 'models.manifest.json'
@@ -18,22 +28,51 @@ REPO = 'lj1995/GPT-SoVITS'
 
 
 def api(url):
-    with urllib.request.urlopen(url, timeout=90) as response:
-        return json.load(response)
+    return request_json(url)
 
 
 def inventory(repo, revision=None):
     info = api(f'https://huggingface.co/api/models/{repo}/revision/{revision or "main"}')
-    revision = info['sha']
-    files = api(f'https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true&limit=1000')
-    return revision, files
+    resolved = info['sha']
+    if revision and revision != resolved:
+        raise ValueError('Hub inventory revision mismatch')
+    url = f'https://huggingface.co/api/models/{repo}/tree/{resolved}?recursive=true&limit=1000'
+    files, visited = [], set()
+    while url:
+        if url in visited or not url.startswith('https://huggingface.co/'):
+            raise ValueError('Unsafe or cyclic Hub pagination URL')
+        visited.add(url)
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    page = json.load(response)
+                    link = response.headers.get('Link', '')
+                break
+            except (OSError, ValueError, http.client.HTTPException):
+                if attempt == 3:
+                    raise
+                time.sleep(2 ** attempt)
+        if not isinstance(page, list):
+            raise ValueError('Invalid Hub file inventory')
+        files.extend(page)
+        next_links = re.findall(r'<([^>]+)>;\s*rel="next"', link)
+        url = next_links[0] if next_links else None
+    names = [item['path'] for item in files]
+    if len(names) != len(set(names)):
+        raise ValueError('Duplicate Hub inventory paths')
+    return resolved, files
 
 
 def make_manifest():
     revision, files = inventory(REPO)
     base = 'upstream/GPT_SoVITS/pretrained_models/'
     wanted = {'s1v3.ckpt', 'gsv-v5-pretrained/s2Gv5turbo.pth',
-              'gsv-v5-pretrained/s2Gv5dev.pth', 'gsv-v5-pretrained/vocoder.pth'}
+              'gsv-v5-pretrained/s2Gv5dev.pth', 'gsv-v5-pretrained/vocoder.pth',
+              'chinese-hubert-base/config.json', 'chinese-hubert-base/preprocessor_config.json',
+              'chinese-hubert-base/pytorch_model.bin',
+              'chinese-roberta-wwm-ext-large/config.json',
+              'chinese-roberta-wwm-ext-large/pytorch_model.bin',
+              'chinese-roberta-wwm-ext-large/tokenizer.json'}
     wanted.update(item['path'] for item in files if item['type'] == 'file'
                   and item['path'].startswith(('chinese-hubert-base/', 'chinese-roberta-wwm-ext-large/')))
     selected = []
@@ -53,7 +92,7 @@ def make_manifest():
     data = dict(source_repo='https://github.com/RVC-Boss/GPT-SoVITS',
                 source_revision=SOURCE_REVISION, source_branch='cuda_graph_accel_v5',
                 default_variant='v5turbo', assets=selected)
-    MANIFEST.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    atomic_json(MANIFEST, data)
     return data
 
 
@@ -69,50 +108,51 @@ def hashes(path):
 
 
 def download(item, download_source='modelscope'):
-    path = ROOT / item['destination']
+    path = safe_path(ROOT, item['destination'])
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size == item['bytes']:
-        sha, git = hashes(path)
-        if (sha == item['sha256'] if item['sha256'] else git == item['git_blob_sha1']):
-            print(f'VERIFIED {item["source"]} {item["bytes"]}', flush=True)
-            return dict(destination=item['destination'], bytes=item['bytes'], sha256=sha)
-    partial = path.with_suffix(path.suffix + '.part')
+    expected, git_hash = item.get('sha256'), item.get('git_blob_sha1')
+    if not expected and not git_hash:
+        raise ValueError(f'Missing source hash: {item["destination"]}')
+    if not isinstance(item['bytes'], int) or item['bytes'] <= 0:
+        raise ValueError('Invalid model size')
+    if valid_file(path, item['bytes'], expected, git_hash):
+        print(f'VERIFIED {item["source"]} {item["bytes"]}', flush=True)
+        return dict(destination=item['destination'], bytes=item['bytes'], sha256=hashes(path)[0])
+    source = urllib.parse.quote(item['source'], safe='/')
     if item.get('url'):
         url = item['url']
-    elif download_source == 'modelscope':
-        if item['repo'] == 'XXXXRT/GPT-SoVITS-Pretrained':
-            url = f'https://www.modelscope.cn/models/XXXXRT/GPT-SoVITS-Pretrained/resolve/master/{item["source"]}'
-        elif item['repo'] == 'lj1995/GPT-SoVITS' and item['source'].startswith(('chinese-hubert-base/', 'chinese-roberta-wwm-ext-large/')):
-            url = f'https://www.modelscope.cn/models/XXXXRT/GPT-SoVITS-Pretrained/resolve/master/pretrained_models/{item["source"]}'
-        else:
-            url = f'https://hf-mirror.com/{item["repo"]}/resolve/{item["revision"]}/{item["source"]}'
     else:
-        url = f'https://huggingface.co/{item["repo"]}/resolve/{item["revision"]}/{item["source"]}'
+        revision = item['revision']
+        if not re.fullmatch('[0-9a-fA-F]{40}', revision):
+            raise ValueError('A pinned Hub commit is required')
+        host = 'https://hf-mirror.com' if download_source == 'modelscope' else 'https://huggingface.co'
+        official = f'{host}/{item["repo"]}/resolve/{revision}/{source}'
+        if download_source == 'modelscope' and item['repo'] == 'XXXXRT/GPT-SoVITS-Pretrained':
+            url = f'https://www.modelscope.cn/models/XXXXRT/GPT-SoVITS-Pretrained/resolve/master/{source}'
+        elif download_source == 'modelscope' and item['repo'] == REPO and item['source'].startswith(('chinese-hubert-base/', 'chinese-roberta-wwm-ext-large/')):
+            url = f'https://www.modelscope.cn/models/XXXXRT/GPT-SoVITS-Pretrained/resolve/master/pretrained_models/{source}'
+        else:
+            url = official
     print(f'DOWNLOAD {item["source"]} {item["bytes"]}', flush=True)
     candidates = [url]
+    if not item.get('url') and url != official:
+        # Mutable ModelScope mirrors may drift; fall back to the pinned Hub mirror.
+        candidates.append(official)
     if url.startswith('https://raw.githubusercontent.com/nltk/nltk_data/'):
         rest = url[len('https://raw.githubusercontent.com/nltk/nltk_data/'):]
         rev, _, rel = rest.partition('/')
         cdn_url = f'https://cdn.jsdelivr.net/gh/nltk/nltk_data@{rev}/{rel}'
         candidates = [cdn_url, url] if download_source == 'modelscope' else [url, cdn_url]
-    last_err = None
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
         try:
-            subprocess.run(['curl.exe', '--fail', '--location', '--retry', '4', '--retry-all-errors',
-                            '--connect-timeout', '30', '--continue-at', '-', '--silent', '--show-error',
-                            '--output', str(partial), candidate], check=True)
-            last_err = None
+            download_url_resumable(candidate, path, item['bytes'], expected, git_hash)
             break
-        except Exception as exc:
-            last_err = exc
-    if last_err is not None:
-        raise last_err
-    if partial.stat().st_size != item['bytes']:
-        raise RuntimeError(f'Incorrect size: {path}')
-    sha, git = hashes(partial)
-    if not (sha == item['sha256'] if item['sha256'] else git == item['git_blob_sha1']):
-        raise RuntimeError(f'Official source hash mismatch: {path}')
-    partial.replace(path)
+        except (OSError, ValueError, http.client.HTTPException):
+            if index == len(candidates) - 1:
+                raise
+            # Do not combine incomplete bytes from different mirrors.
+            path.with_suffix(path.suffix + '.part').unlink(missing_ok=True)
+    sha = hashes(path)[0]
     print(f'VERIFIED {item["source"]} sha256={sha}', flush=True)
     return dict(destination=item['destination'], bytes=item['bytes'], sha256=sha)
 
@@ -122,21 +162,28 @@ def extract_g2pw():
     archive = ROOT / 'downloads/G2PWModel.zip'
     with zipfile.ZipFile(archive) as z:
         for member in z.infolist():
+            # Validate the original name before stripping the official top-level folder.
+            safe_path(target, member.filename.rstrip('/'))
             parts = Path(member.filename).parts
-            if '..' in parts or Path(member.filename).is_absolute():
-                raise RuntimeError('Unsafe archive member')
-            # Official archive has one top-level G2PWModel directory.
-            relative = Path(*parts[1:]) if parts[0].startswith('G2PWModel') else Path(*parts)
-            output = target / relative
+            relative = Path(*parts[1:]) if parts[0] == 'G2PWModel' else Path(*parts)
+            if relative == Path('.'):
+                continue
+            output = safe_path(target, relative.as_posix())
             if member.is_dir():
                 output.mkdir(parents=True, exist_ok=True)
             else:
                 output.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(member) as src, output.open('wb') as dst:
-                    shutil.copyfileobj(src, dst)
+                temporary = output.with_name(output.name + '.extracting')
+                try:
+                    with z.open(member) as src, temporary.open('wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                    temporary.replace(output)
+                finally:
+                    temporary.unlink(missing_ok=True)
 
 
-def runtime_assets():
+def runtime_assets(download_source='modelscope'):
+    (ROOT / 'runtime.manifest.json').unlink(missing_ok=True)
     runtime = UPSTREAM / 'runtime'
     runtime.mkdir(exist_ok=True)
     ffmpeg_target = runtime / 'ffmpeg.exe'
@@ -160,7 +207,7 @@ def runtime_assets():
         if not (source_checkout / '.git').exists():
             subprocess.run(['git', 'clone', '--filter=blob:none', '--depth', '1', '--no-checkout',
                             '--branch', 'gh-pages', 'https://github.com/nltk/nltk_data.git',
-                            str(source_checkout)], check=True)
+                            str(source_checkout)], check=True, timeout=300)
         revision = subprocess.check_output(['git', '-C', str(source_checkout), 'rev-parse', 'HEAD'], text=True).strip()
         assets = []
         for category, corpus in (('taggers', 'averaged_perceptron_tagger'),
@@ -173,38 +220,38 @@ def runtime_assets():
                                bytes=int(entry[3]), sha256=None, git_blob_sha1=entry[2], category=category,
                                url=f'https://raw.githubusercontent.com/nltk/nltk_data/{revision}/{source}'))
         auxiliary = dict(nltk_data_revision=revision, assets=assets)
-        manifest_path.write_text(json.dumps(auxiliary, indent=2) + '\n', encoding='utf-8')
+        atomic_json(manifest_path, auxiliary)
     for item in auxiliary['assets']:
-        download(item)
+        download(item, download_source)
         destination = runtime / 'nltk_data' / item['category']
         destination.mkdir(parents=True, exist_ok=True)
         # g2p_en checks for the .zip itself even when the corpus is extracted.
         shutil.copy2(ROOT / item['destination'], destination / Path(item['destination']).name)
         with zipfile.ZipFile(ROOT / item['destination']) as archive:
             for name in archive.namelist():
-                if not (destination / name).resolve().is_relative_to(destination.resolve()):
-                    raise RuntimeError('Unsafe NLTK archive member')
+                safe_path(destination, name.rstrip('/'))
             archive.extractall(destination)
 
-    from fast_langdetect.infer import ModelDownloader, DEFAULT_FASTTEXT_LARGE_MODEL_URL, FASTTEXT_LARGE_MODEL_MD5
+    from fast_langdetect.infer import DEFAULT_FASTTEXT_LARGE_MODEL_URL, FASTTEXT_LARGE_MODEL_MD5
     language_model = UPSTREAM / 'GPT_SoVITS/pretrained_models/fast_langdetect/lid.176.bin'
     language_model.parent.mkdir(parents=True, exist_ok=True)
-    ModelDownloader.download(DEFAULT_FASTTEXT_LARGE_MODEL_URL, language_model,
-                             expected_md5=FASTTEXT_LARGE_MODEL_MD5)
-    language_sha = hashes(language_model)[0]
     previous = auxiliary.get('language_detector')
-    if previous and previous['sha256'] != language_sha:
-        raise RuntimeError('Pinned language detector SHA256 mismatch')
+    pinned_sha = previous['sha256'] if previous else None
+    pinned_size = previous['bytes'] if previous else None
+    if not valid_file(language_model, pinned_size, pinned_sha, expected_md5=FASTTEXT_LARGE_MODEL_MD5):
+        download_url_resumable(DEFAULT_FASTTEXT_LARGE_MODEL_URL, language_model,
+                               pinned_size, pinned_sha, expected_md5=FASTTEXT_LARGE_MODEL_MD5)
+    language_sha = hashes(language_model)[0]
     auxiliary['language_detector'] = dict(url=DEFAULT_FASTTEXT_LARGE_MODEL_URL,
         destination=language_model.relative_to(ROOT).as_posix(),
         md5=FASTTEXT_LARGE_MODEL_MD5, sha256=language_sha, bytes=language_model.stat().st_size)
-    manifest_path.write_text(json.dumps(auxiliary, indent=2) + '\n', encoding='utf-8')
+    atomic_json(manifest_path, auxiliary)
     report = []
     for path in sorted(runtime.rglob('*')):
         if path.is_file():
             report.append(dict(destination=path.relative_to(ROOT).as_posix(), bytes=path.stat().st_size,
                                sha256=hashes(path)[0]))
-    (ROOT / 'runtime.manifest.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    atomic_json(ROOT / 'runtime.manifest.json', report)
 
 
 def main():
@@ -213,15 +260,34 @@ def main():
     parser.add_argument('--models-only', action='store_true')
     parser.add_argument('--source', choices=['modelscope', 'huggingface'], default='modelscope')
     args = parser.parse_args()
+    if args.runtime_only and args.models_only:
+        parser.error('--runtime-only and --models-only are mutually exclusive')
     configure(offline=False)
     if not args.runtime_only:
+        report_path = ROOT / 'models.verified.json'
+        report_path.unlink(missing_ok=True)
         data = json.loads(MANIFEST.read_text(encoding='utf-8')) if MANIFEST.exists() else make_manifest()
+        if data.get('source_revision') != SOURCE_REVISION or not data.get('assets'):
+            raise ValueError('Model manifest is empty or belongs to a different source revision')
+        destinations = [item['destination'] for item in data['assets']]
+        if len(destinations) != len(set(destinations)):
+            raise ValueError('Duplicate model destinations')
+        required = {'s1v3.ckpt', 'gsv-v5-pretrained/s2Gv5turbo.pth',
+                    'gsv-v5-pretrained/s2Gv5dev.pth', 'gsv-v5-pretrained/vocoder.pth',
+                    'chinese-hubert-base/config.json', 'chinese-hubert-base/preprocessor_config.json',
+                    'chinese-hubert-base/pytorch_model.bin', 'chinese-roberta-wwm-ext-large/config.json',
+                    'chinese-roberta-wwm-ext-large/pytorch_model.bin',
+                    'chinese-roberta-wwm-ext-large/tokenizer.json', 'G2PWModel.zip'}
+        if not required.issubset({item['source'] for item in data['assets']}):
+            raise ValueError('Model manifest is missing required inference assets')
+        for destination in destinations:
+            safe_path(ROOT, destination)
         with ThreadPoolExecutor(max_workers=3) as pool:
             verified = list(pool.map(lambda item: download(item, args.source), data['assets']))
         extract_g2pw()
-        (ROOT / 'models.verified.json').write_text(json.dumps(verified, indent=2) + '\n', encoding='utf-8')
+        atomic_json(report_path, verified)
     if not args.models_only:
-        runtime_assets()
+        runtime_assets(args.source)
 
 
 if __name__ == '__main__':

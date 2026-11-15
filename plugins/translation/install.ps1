@@ -1,29 +1,23 @@
-param([switch]$Locked)
+param(
+    [switch]$Locked,
+    [switch]$RefreshLock,
+    [ValidateSet('modelscope','huggingface')][string]$Source = 'modelscope',
+    [ValidateSet('cuda','cpu')][string]$Device = 'cuda'
+)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $root 'install-common.ps1')
+Initialize-LingVoiceInstall -Root $root -Source $Source
 $uv = Join-Path $root 'runtime/tools/uv.exe'
 $python = Join-Path $PSScriptRoot '.venv/Scripts/python.exe'
-$env:UV_CACHE_DIR = Join-Path $root 'runtime/cache/uv'
-$env:TEMP = Join-Path $root 'runtime/tmp'
-$env:TMP = $env:TEMP
-$env:PYTHONNOUSERSITE = '1'
-$env:PYTHONPATH = $null
-$env:PYTHONHOME = $null
+Assert-LingVoicePython -Python $python -Version '3.12'
 $env:HF_HOME = Join-Path $PSScriptRoot 'cache/huggingface'
-$env:UV_DEFAULT_INDEX = $null
-$env:UV_INDEX_URL = $null
-$env:UV_HTTP_TIMEOUT = '300'
-$pypiIndex = if ($env:LINGVOICE_PYPI_INDEX) { $env:LINGVOICE_PYPI_INDEX } else { 'https://pypi.org/simple/' }
-$requirements = if ($Locked -or (Test-Path (Join-Path $PSScriptRoot 'requirements.lock.txt'))) { Join-Path $PSScriptRoot 'requirements.lock.txt' } else { Join-Path $PSScriptRoot 'requirements.txt' }
-if ($requirements -like '*.lock.txt') {
-  & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match -r $requirements
-  if ($LASTEXITCODE -ne 0) { throw 'Translation dependencies failed.' }
-} else {
-  & $uv pip install --python $python 'torch==2.10.0+cu128' 'torchvision==0.25.0+cu128' --index-url https://download.pytorch.org/whl/cu128 --extra-index-url $pypiIndex --index-strategy unsafe-best-match
-  if ($LASTEXITCODE -ne 0) { throw 'CUDA PyTorch installation failed.' }
-  & $uv pip install --python $python --index-url $pypiIndex --extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match -r $requirements
-  if ($LASTEXITCODE -ne 0) { throw 'Translation dependencies failed.' }
-}
-& $uv pip check --python $python
-if ($LASTEXITCODE -ne 0) { throw 'Translation dependency check failed.' }
-& $uv pip freeze --python $python | Set-Content (Join-Path $PSScriptRoot 'requirements.lock.txt') -Encoding UTF8
+$lock = Join-Path $PSScriptRoot 'requirements.lock.txt'
+if ($Locked -and $RefreshLock) { throw 'Locked and RefreshLock cannot be combined.' }
+if ($Locked -and !(Test-Path -LiteralPath $lock)) { throw 'No validated translation lock exists. Run install.ps1 without -Locked first.' }
+$requirements = if (!$RefreshLock -and (Test-Path -LiteralPath $lock)) { $lock } else { Join-Path $PSScriptRoot 'requirements.txt' }
+$channel = if ($Device -eq 'cpu') { 'cpu' } else { 'cu128' }
+Install-LingVoicePackages -Uv $uv -Python $python -Requirements $requirements -Channel $channel -TorchPackages @("torch==2.10.0+$channel", "torchvision==0.25.0+$channel")
+# pip check alone cannot detect DLL errors or incompatible transformers/torch APIs.
+Invoke-LingVoiceNative $python @('-I','-c',"import torch,torchvision,transformers,accelerate,bitsandbytes,sentencepiece,safetensors; from PIL import Image; from transformers import AutoTokenizer, AutoModelForMultimodalLM, BitsAndBytesConfig; assert torch.__version__ == '2.10.0+$channel'; assert torchvision.__version__ == '0.25.0+$channel'")
+Write-LingVoiceLock -Uv $uv -Python $python -Path $lock

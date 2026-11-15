@@ -92,6 +92,13 @@ export function ServicesSettings() {
     return () => { unsubscribe?.(); };
   }, [refreshLocalStatus]);
 
+  // Recover progress when an SSE notification is missed or the page reconnects.
+  useEffect(() => {
+    if (!downloadProgress?.active) return;
+    const timer = window.setInterval(() => { void refreshLocalStatus().catch(() => {}); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [downloadProgress?.active, refreshLocalStatus]);
+
   useEffect(() => {
     let live = true;
     void Promise.all([
