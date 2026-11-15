@@ -1,4 +1,4 @@
-param([switch]$SkipModels, [switch]$RefreshLock)
+param([switch]$SkipModels, [switch]$RefreshLock, [switch]$NoModels)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $python = Join-Path $root '.venv/Scripts/python.exe'
@@ -30,8 +30,10 @@ $requirements = if ((Test-Path $lock) -and !$RefreshLock) { $lock } else { Join-
 if ($LASTEXITCODE -ne 0) { throw 'Inference dependencies installation failed.' }
 & $uv pip check --python $python
 if ($LASTEXITCODE -ne 0) { throw 'Dependency validation failed.' }
-& $python (Join-Path $root 'prepare_models.py') $(if ($SkipModels) { '--runtime-only' })
-if ($LASTEXITCODE -ne 0) { throw 'Model/runtime preparation failed.' }
+if (!$NoModels) {
+  & $python (Join-Path $root 'prepare_models.py') $(if ($SkipModels) { '--runtime-only' })
+  if ($LASTEXITCODE -ne 0) { throw 'Model/runtime preparation failed.' }
+}
 # Lock only a completely installed environment, never a guessed dependency set.
 & $uv pip freeze --python $python | Set-Content -Encoding UTF8 $lock
 if ($LASTEXITCODE -ne 0) { throw 'Environment lock failed.' }

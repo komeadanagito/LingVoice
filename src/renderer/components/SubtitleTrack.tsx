@@ -316,17 +316,43 @@ export function useSubtitleTrack(videoSrc: string, embedSrc: string, currentTime
       const dubbingId = crypto.randomUUID();
       dubbingJob.current = dubbingId;
 
+      const dubbingCues: Array<{ id: number; start: number; end: number; text: string; translated?: string; speechText?: string }> = [];
+      const sortedForDub = [...workingCues]
+        .filter(c => c.text.trim().length > 0 && Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start)
+        .sort((a, b) => a.start - b.start || a.end - b.end);
+      for (const rawCue of sortedForDub) {
+        const text = rawCue.text.trim().slice(0, 4096);
+        const translated = rawCue.translated?.trim().slice(0, 4096) || undefined;
+        const speechText = (rawCue.translated ?? rawCue.text).trim().slice(0, 4096) || undefined;
+        let start = Number(Math.max(0, rawCue.start).toFixed(3));
+        if (start + offset < 0) start = Number(Math.max(0, -offset).toFixed(3));
+        let end = Number(Math.max(rawCue.end, start + 0.05).toFixed(3));
+        const prev = dubbingCues[dubbingCues.length - 1];
+        if (prev && start + offset < prev.end + offset) {
+          if (start > prev.start + 0.05) {
+            prev.end = start;
+          } else {
+            start = prev.end;
+            if (end <= start) end = Number((start + 0.05).toFixed(3));
+          }
+        }
+        dubbingCues.push({
+          id: rawCue.id,
+          start,
+          end,
+          text,
+          ...(translated ? { translated } : {}),
+          ...(speechText ? { speechText } : {}),
+        });
+      }
+      if (!dubbingCues.length) {
+        throw new Error(zh ? '当前没有可用于配音的有效字幕时间轴。' : 'No valid timed subtitle cues available for dubbing.');
+      }
+
       const dubbingResponse = await window.lingvoice.runDubbing({
         jobId: dubbingId,
         file: localPath,
-        cues: workingCues.map(c => ({
-          id: c.id,
-          start: c.start,
-          end: c.end,
-          text: c.text,
-          translated: c.translated,
-          speechText: c.translated || c.text,
-        })),
+        cues: dubbingCues,
         offset,
         backgroundVolume: 1,
         preview: false,

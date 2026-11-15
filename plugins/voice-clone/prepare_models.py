@@ -122,10 +122,18 @@ def extract_g2pw():
 
 
 def runtime_assets():
-    import imageio_ffmpeg
     runtime = UPSTREAM / 'runtime'
     runtime.mkdir(exist_ok=True)
-    shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), runtime / 'ffmpeg.exe')
+    ffmpeg_target = runtime / 'ffmpeg.exe'
+    try:
+        import imageio_ffmpeg
+        shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), ffmpeg_target)
+    except ImportError:
+        existing_ffmpeg = shutil.which('ffmpeg') or shutil.which('ffmpeg.exe')
+        if existing_ffmpeg:
+            shutil.copy2(existing_ffmpeg, ffmpeg_target)
+        elif not ffmpeg_target.is_file():
+            raise RuntimeError("Missing imageio_ffmpeg and system ffmpeg. Run plugins/voice-clone/install.ps1 first.")
     # NLTK >=3.10's DNS guard mistakes this machine's VPN synthetic IP for SSRF.
     # Use fixed official GitHub URLs, pin the commit and verify Git blob hashes;
     # no arbitrary URL is ever accepted from an inference request.

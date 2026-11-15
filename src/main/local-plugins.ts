@@ -87,6 +87,45 @@ async function isFile(filePath: string): Promise<boolean> {
   }
 }
 
+async function isDir(dirPath: string): Promise<boolean> {
+  try {
+    return (await fs.stat(dirPath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function hasVenvPackage(serviceDir: string, pkg: string): Promise<boolean> {
+  if (process.platform === 'win32') {
+    return await isDir(path.join(serviceDir, '.venv', 'Lib', 'site-packages', pkg));
+  }
+  const libDir = path.join(serviceDir, '.venv', 'lib');
+  try {
+    const entries = await fs.readdir(libDir);
+    for (const entry of entries) {
+      if (entry.startsWith('python') && await isDir(path.join(libDir, entry, 'site-packages', pkg))) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+async function isServiceDepsReady(pluginsDir: string, id: LocalPluginId | 'installer'): Promise<boolean> {
+  const dir = path.join(pluginsDir, id);
+  if (!await isFile(pythonExecutable(dir))) return false;
+  if (id === 'installer') {
+    return (await hasVenvPackage(dir, 'huggingface_hub')) && (await hasVenvPackage(dir, 'psutil'));
+  }
+  if (id === 'asr' || id === 'translation') {
+    return (await hasVenvPackage(dir, 'torch')) && (await hasVenvPackage(dir, 'transformers'));
+  }
+  return (await hasVenvPackage(dir, 'torch'))
+    && (await hasVenvPackage(dir, 'imageio_ffmpeg'))
+    && (await hasVenvPackage(dir, 'fast_langdetect'))
+    && (await isFile(path.join(dir, 'upstream', 'tools', 'uvr5', 'bsroformer.py')));
+}
+
 async function checkWeights(pluginsDir: string, id: LocalPluginId): Promise<boolean> {
   const dir = path.join(pluginsDir, id);
   try {
@@ -99,7 +138,8 @@ async function checkWeights(pluginsDir: string, id: LocalPluginId): Promise<bool
       const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as { complete?: unknown };
       return manifest.complete === true && await isFile(path.join(dir, 'models', 'gemma-4-e2b-it', 'model.safetensors'));
     }
-    return await isFile(path.join(dir, 'models.verified.json'));
+    return (await isFile(path.join(dir, 'models.verified.json')))
+      && (await isFile(path.join(dir, 'runtime.manifest.json')));
   } catch {
     return false;
   }
@@ -545,12 +585,12 @@ export class LocalPluginManager {
     const entries = await Promise.all(ALL_IDS.map(async id => {
       const spec = SPECS[id];
       const dir = this.serviceDir(id);
-      const [hasPy, hasScript, healthy] = await Promise.all([
-        isFile(pythonExecutable(dir)),
+      const [depsReady, hasScript, healthy] = await Promise.all([
+        isServiceDepsReady(this.pluginsDir, id),
         isFile(path.join(dir, spec.script)),
         this.probeHealth(id),
       ]);
-      const installed = hasPy && hasScript;
+      const installed = depsReady && hasScript;
       const weightsReady = installed ? await checkWeights(this.pluginsDir, id) : false;
       const child = this.children.get(id);
       const running = healthy || (!!child && child.exitCode === null);
@@ -646,18 +686,18 @@ export class LocalPluginManager {
   }
 
   private async ensureDownloadEnvironment(target: LocalEngineDownloadTarget): Promise<void> {
-    const installerPy = pythonExecutable(path.join(this.pluginsDir, 'installer'));
     const servicesToInstall: LocalPluginId[] = [];
-    if (target === 'all' || target === 'asr') {
-      if (!await isFile(pythonExecutable(this.serviceDir('asr')))) servicesToInstall.push('asr');
+    if ((target === 'all' || target === 'asr') && !await isServiceDepsReady(this.pluginsDir, 'asr')) {
+      servicesToInstall.push('asr');
     }
-    if (target === 'all' || target === 'translation') {
-      if (!await isFile(pythonExecutable(this.serviceDir('translation')))) servicesToInstall.push('translation');
+    if ((target === 'all' || target === 'translation') && !await isServiceDepsReady(this.pluginsDir, 'translation')) {
+      servicesToInstall.push('translation');
     }
-    if (target === 'all' || target === 'voice-clone') {
-      if (!await isFile(pythonExecutable(this.serviceDir('voice-clone')))) servicesToInstall.push('voice-clone');
+    // Separation runs Karaoke BS-RoFormer inside the voice-clone venv and upstream uvr5 package.
+    if ((target === 'all' || target === 'voice-clone' || target === 'separation') && !await isServiceDepsReady(this.pluginsDir, 'voice-clone')) {
+      servicesToInstall.push('voice-clone');
     }
-    const needInstaller = !await isFile(installerPy);
+    const needInstaller = !await isServiceDepsReady(this.pluginsDir, 'installer');
     if (!needInstaller && servicesToInstall.length === 0) return;
 
     const psScript = path.join(this.pluginsDir, 'plugins.ps1');
@@ -674,12 +714,11 @@ export class LocalPluginManager {
       );
       return;
     }
-    const installTargets: Array<'all' | LocalPluginId> = target === 'all' ? ['all'] : servicesToInstall;
-    for (const svc of installTargets) {
+    for (const svc of servicesToInstall) {
       this.emitDownload({ stage: 'bootstrap', message: `正在安装 ${svc} 本地运行环境…`, percent: null });
       await this.runDownloadCommand(
         'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'install', '-Service', svc],
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'install', '-Service', svc, '-NoModels'],
         this.pluginsDir,
         line => this.emitDownload({ message: line }),
       );

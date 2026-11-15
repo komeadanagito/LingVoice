@@ -1,6 +1,7 @@
 param(
     [ValidateSet('bootstrap','install','download','check','start','stop','status')][string]$Action = 'check',
-    [ValidateSet('all','asr','translation','voice-clone')][string]$Service = 'all'
+    [ValidateSet('all','asr','translation','voice-clone')][string]$Service = 'all',
+    [switch]$NoModels
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -26,7 +27,11 @@ if (!(Test-Path $installer)) { throw 'Run plugins.ps1 -Action bootstrap first.' 
 switch ($Action) {
     'install' {
         foreach ($name in $services) {
-            & (Join-Path $root "$name/install.ps1")
+            if ($name -eq 'voice-clone' -and $NoModels) {
+                & (Join-Path $root "$name/install.ps1") -NoModels
+            } else {
+                & (Join-Path $root "$name/install.ps1")
+            }
             if (!$? -or $LASTEXITCODE -ne 0) { throw "Install failed: $name" }
         }
     }

@@ -887,7 +887,21 @@ export class AsrService {
       } finally { await handle.close(); }
       this.check(run.signal);
       if (!cues.length) throw new Error('No speech found in the selected media. 未在所选媒体中检测到人声台词（请确认视频包含说话人声而非纯背景音乐/纯录屏）。');
-      return cues.sort((a, b) => a.start - b.start || a.end - b.end).map((cue, index) => ({ ...cue, id: index + 1 }));
+      cues.sort((a, b) => a.start - b.start || a.end - b.end);
+      // Clamp tiny cross-chunk overlaps so downstream dubbing always receives strictly non-overlapping cues.
+      for (let i = 1; i < cues.length; i++) {
+        if (cues[i].start < cues[i - 1].end) {
+          if (cues[i].start > cues[i - 1].start + 0.05) {
+            cues[i - 1].end = cues[i].start;
+          } else {
+            cues[i].start = cues[i - 1].end;
+            if (cues[i].end <= cues[i].start) {
+              cues[i].end = Number((cues[i].start + 0.05).toFixed(3));
+            }
+          }
+        }
+      }
+      return cues.map((cue, index) => ({ ...cue, id: index + 1 }));
     } finally {
       try { if (temporary) await fs.rm(temporary, { recursive: true, force: true }); }
       finally { this.run = undefined; }
