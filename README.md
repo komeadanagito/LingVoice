@@ -1,163 +1,143 @@
-# 另一声 LingVoice · 视频下载器
+<div align="center">
 
-Windows 桌面原型，先适配哔哩哔哩普通投稿视频。技术栈为 **TypeScript + React 19 + Vite + Electron**，TypeScript 开启严格模式，界面使用项目中的百灵鸟图标。
+  <img src="icon/lingvoice-logo.svg" width="96" height="96" alt="LingVoice 另一声" style="border-radius: 20px; margin-bottom: 12px;" />
 
-- 前端：React 函数组件、自定义 Hook 管理状态，Vite 提供构建和开发热更新。
-- 桌面主进程、预加载脚本、下载核心及测试：均使用 TypeScript。
-- 主进程与前端共享接口、事件、视频信息等类型；通过隔离的进程间通信（IPC）访问本地能力。
-- 视频解析与音视频合并继续使用 yt-dlp / FFmpeg 本地组件。
+  # 另一声 · LingVoice
 
-## 启动
+  **集 B 站视频解析下载、AI 语音识别、双语字幕翻译与声音克隆配音于一体的桌面工作台**
 
-开发环境需要 **Node.js 22.13+ 或更新的 LTS 版本**（含 npm；历史记录使用内置 `node:sqlite`），在项目目录执行：
+  <p align="center">
+    <a href="#核心特性">核心特性</a> &nbsp;•&nbsp;
+    <a href="#快速启动">快速启动</a> &nbsp;•&nbsp;
+    <a href="#本地-ai-插件">本地 AI 插件</a> &nbsp;•&nbsp;
+    <a href="#项目构建与测试">项目构建与测试</a> &nbsp;•&nbsp;
+    <a href="#安全与存储机制">安全与存储机制</a>
+  </p>
+
+  <p align="center">
+    <img src="https://img.shields.io/badge/版本-v0.1.0-blue?style=flat-square" alt="版本" />
+    <img src="https://img.shields.io/badge/平台-Windows%20x64-0078D6?style=flat-square" alt="平台" />
+    <img src="https://img.shields.io/badge/Node-%3E%3D22.13.0-339933?style=flat-square" alt="Node.js" />
+    <img src="https://img.shields.io/badge/栈-Electron%20%2B%20React%2019-47848F?style=flat-square" alt="技术栈" />
+  </p>
+
+</div>
+
+> 面向视频创作者与本地工作流的桌面端音视频处理伴侣。专注本地数据掌控、云端/离线灵活扩展与全流程一键协同。
+
+<div align="center">
+  <p align="center"><b>☀️ 工作台预览</b></p>
+  <img src="image/image.png" alt="LingVoice 另一声桌面工作台预览" width="880" style="border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); margin: 8px 0 24px 0;" />
+</div>
+
+---
+
+## 核心特性
+
+- **B 站视频解析与合并** &mdash; 支持 `BV` / `av` / `b23.tv` 链接及分享文本解析，自动调用 `yt-dlp` 与 `FFmpeg` 无损混流为 MP4 / MKV，支持 Netscape `.txt` Cookie 挂载与断点续传。
+- **全流程任务工作台** &mdash; 支持批量导入本地视频或链接，通过任务队列自动串行推进「识别 &rarr; 翻译 &rarr; 配音」，并由内置 `node:sqlite`（WAL 事务模式）持久化保存任务、字幕时间轴与配音记录。
+- **高精度 ASR 与双语字幕** &mdash; 本地分段提取 16 kHz 单声道音频并自动还原时间轴（最长支持 6 小时）；支持视频内嵌**双语 / 译文 / 原文 / 关闭**四态实时切换、字号与延迟微调，以及 SRT / VTT 导入与 SRT 导出。
+- **人声分离与 AI 配音克隆** &mdash; 支持对白与背景音轨分离（BS-RoFormer），结合阿里百炼 Token Plan TTS（`qwen-audio-3.0-tts-plus`）或本地 `GPT-SoVITS V5` 复刻音色，保音高变速对齐时间轴并重新混音输出 `.mkv`。
+- **云端与本地双轨扩展** &mdash; 提供可扩展的 `ProviderRegistry` 适配器架构（兼容 OpenAI、Responses、LibreTranslate 及自定义服务），同时内置独立隔离的本地 Python AI 插件体系，按需切换不锁定厂商。
+- **创新双模与双语界面** &mdash; 既可作为独立 Electron 原生桌面端运行，也支持通过 `npm run web` 在浏览器直连 Node 真实后端进行调试；原生内置**简体中文 / English** 实时无刷新切换。
+
+---
+
+## 快速启动
+
+开发环境需要 **Node.js 22.13.0 或更高版本**（依赖内置 `node:sqlite`）。首次解析 B 站视频时会自动从 GitHub Release 下载并校验 `yt-dlp.exe`。
+
+### 1. 桌面客户端开发模式
+
+启动 Vite 热更新与 Electron 主进程：
 
 ```powershell
 npm install
 npm run dev
 ```
 
-`npm run dev` 启动 Vite 和 Electron，前端修改可热更新；修改主进程或预加载脚本后需要停止并重新运行。开发服务器地址为 `http://localhost:45173`，主机名和端口集中在 `src/shared/dev-server.ts`，改动后 `npm run dev`、`npm run web` 与主进程同步生效。
+### 2. 浏览器调试模式
 
-`npm run web` 启动本地 Web 服务并自动打开浏览器。`src/renderer/web-mock.ts` 虽保留历史命名，实际通过同源 HTTP 接口连接 `scripts/browser-backend.ts`，解析、下载、识别、翻译、配音和 SQLite 历史记录都在 Node 服务端处理，不是模拟数据。服务默认只接受指定本地来源的请求，请勿未经额外认证与部署加固直接暴露到公网。
-
-`npm start` 会先构建 TypeScript 和 React，再启动本地构建版本，不依赖开发服务器。
-
-也可双击 `启动下载器.bat`。首次安装需要下载 Electron 和 FFmpeg；首次解析视频会从 yt-dlp 官方 GitHub Release 下载 `yt-dlp.exe`，并核对官方 SHA-256 校验值。请确保网络能够访问 GitHub 及其文件下载域名。该组件存储于应用用户数据目录，不会重复下载。
-
-如果 npm 提示阻止了安装脚本，执行 `npm approve-scripts`，仅审核允许 Electron、ffmpeg-static 等本项目所需组件后重新安装。请勿盲目允许陌生包的脚本。
-
-## 历史记录与 SQLite
-
-- 任务列表、字幕时间轴与译文、显示设置、配音结果引用和上次选中的任务 ID 都保存在 SQLite。Web 版默认数据库为 `~/.lingvoice/web/history.sqlite`；桌面版为 Electron 用户数据目录（`app.getPath('userData')`）下的 `history.sqlite`。两种运行方式各用自己的数据库，不自动互相同步。
-- 视频不作为大 BLOB 放进 SQLite。Web 版打开的本地视频会保存到服务端 `~/.lingvoice/web/task-media/`，最大 512 MB；下载的视频和生成的配音继续留在各自输出目录。数据库保存服务端签发的媒体引用，`media-handles/` 保存对应的访问映射。桌面版打开的原视频保存其原始路径。
-- 写入采用 SQLite 事务和 WAL；成功提交后结束“正在保存”状态，成功时不显示常驻提示；写入失败会显示错误。清除浏览器缓存、IndexedDB 或 localStorage 不会删除 SQLite 中已经保存的任务。同一 Web 服务的不同浏览器可以读取同一份列表，但这不是账号云同步；桌面版与 Web 版亦不共用任务库。
-- 首次升级会读取当前浏览器旧的 `lingvoice-tasks` IndexedDB，按原 ID 导入 SQLite，并将旧的本地视频上传到服务端。每条任务确认提交成功后才从旧的 `tasks` 集合移到 `migrated-tasks` 备份集合；失败时保留原始数据并提示，重新加载可继续迁移，已存在的任务不会重复导入。旧浏览器数据仍需在原来的网站地址与浏览器中打开才能迁移。
-- 删除历史任务仅删除数据库记录，磁盘视频和导出文件会保留。正在运行的识别、翻译、配音请求不是持久化后台队列；刷新可恢复已保存结果，不能恢复尚未返回的请求。
-- 备份时先关闭桌面应用或停止 Web 服务，再备份数据库、媒体引用目录、视频及配音输出文件。运行时 SQLite 可能有 `history.sqlite-wal` / `history.sqlite-shm`，不要只复制正在使用的主数据库文件；仅备份 SQLite 也不会包含视频本体。
-
-## Provider、字幕翻译与语音识别
-
-### 配置服务
-
-1. 在桌面版「设置 → 服务提供商 · Providers」添加一个 Provider（服务连接配置），填写名称、接口适配器、服务器地址和 API Key，然后保存。可以添加多个同类型服务。
-2. 在「字幕翻译」选择 Provider、模型、协议和目标语言；在「语音识别 · ASR」选择 Provider、识别模型和音频语言，分别保存。两种任务可共用同一个 Provider，也可使用不同服务，地址与密钥只维护一次。
-3. OpenAI 兼容适配器提供 Chat Completions、Responses、`/v1/audio/transcriptions` 及模型列表；LibreTranslate 适配器只提供机器翻译。界面按能力筛选，不能将仅支持翻译的服务绑定给 ASR。服务商实际部署的接口、语言和模型仍以其文档为准。
-4. 一般填写服务的基础地址，例如 `https://api.openai.com/v1`。任务勾选「Provider 地址是完整请求地址」后不拼接接口路径；若不同任务使用不同的自定义完整路径，可建立独立 Provider。
-
-密钥通过 Electron `safeStorage` 加密保存在用户数据目录的 `providers.json`，前端只获取密钥是否存在，不回传密钥或密文。留空保留旧密钥，也可单独清除。旧版翻译 / ASR 配置会在首次升级时导入 Provider 列表，旧文件保留作为迁移备份。正在被任务绑定的 Provider 不能直接删除，需先修改绑定。
-
-### 从视频识别并翻译
-
-1. 打开本地或已下载的视频，点击播放器「识别音频」。
-2. 确认上传提示后，本地 FFmpeg 提取单声道 16 kHz 音频，按 5 分钟分段上传到所选 ASR Provider；分段时间戳会自动还原到视频时间轴，最长支持 6 小时。
-3. OpenAI 兼容 ASR 需要支持 `verbose_json` 和 `segments` 时间戳，建议先使用 `whisper-1`。仅返回纯文本的接口 / 模型不能生成同步字幕，应用会提示失败，不会编造时间轴。
-4. 识别成功后原文字幕显示在视频上，再点击「翻译字幕」生成译文。也可以直接导入 SRT / VTT 跳过识别。
-5. 支持双语、仅译文、仅原文或关闭字幕，调整字号和延迟，并导出 SRT。没有译文的字幕回退到原文；字幕随任务自动保存到 SQLite，也建议导出重要字幕作为独立备份。
-
-音频 / 字幕会发送到你配置的服务，可能收费；远程服务应使用 HTTPS。ASR 支持停止：中断提取 / 当前请求，清理临时音频并停止后续分段；已经发送的请求仍可能计费。翻译停止会忽略在途结果并停止后续批次。
-
-**当前边界**：只支持本地 / 下载后的视频；平台 iframe 无法直接读取播放时间，暂不支持同步。尚未接入平台字幕自动提取、本地离线 ASR 和配音替换。浏览器预览可导入和显示原文字幕，服务配置与识别 / 翻译需要桌面版。
-
-### Token Plan 视频配音
-
-- 在「设置 → 视频配音服务 · TTS」填写 `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`，选择套餐实际开放的模型。当前 Token Plan 官方文档列出 `qwen-audio-3.0-tts-plus`；密钥使用该套餐对应的 API Key，不能与普通百炼业务空间的密钥、音色混用。
-- 主界面的「配音」使用这里保存的地址、模型和密钥，不会被旧的独立配音配置悄悄覆盖，也不会把 3.0 自动换成 3.1。地址会转换为同一域名的 `/api/v1`：合成调用 `/services/audio/tts/SpeechSynthesizer`，复刻调用 `/services/audio/tts/customization`，不会把语音请求发到 `/chat/completions`。
-- 客户端同时处理直接返回的 24 kHz PCM WAV 和标准 `output.audio.url` 响应。音频大小、WAV 格式、下载主机、公开 IP、TLS 校验和禁止重定向的限制仍保留；不会自动重试可能计费的合成请求。
-- 普通合成测试使用系统音色，不代表账号支持 `voice-enrollment` 音色复刻。Token Plan 多模态文档描述普通语音合成，但未明确承诺复刻接口权限。若复刻返回 403/404，按错误提示检查套餐权限或使用明确支持复刻的业务空间；程序不会擅自换成系统音色，也不会把套餐密钥发往其他域名。
-- Token Plan 的适用工具、允许的调用场景、模型与额度以订阅条款为准；接口适配不会扩展账号本身的权限。
-
-参考：[Token Plan 多模态接入](https://help.aliyun.com/en/model-studio/token-plan-multimodal-gen)、[声音复刻](https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide)。
-
-### 扩展 Provider
-
-- 共享类型与能力描述位于 `src/shared/providers.ts`；服务连接管理、密钥保存和适配器注册位于 `src/main/providers.ts`。
-- 新增适配器实现 `ProviderAdapter`，通过 `ProviderRegistry.register()` 注册；声明 `translation`、`asr`、`models` 中实际支持的能力，并提供对应请求构造与结果归一化函数。Provider 类型是注册标识字符串，不是固定服务商枚举。
-- 适配器元数据的 `translationOptions` 决定模型和协议配置项；服务商选项和能力筛选从注册表动态生成，播放器不判断具体服务商名称。
-- 字幕翻译服务负责分批 / 校验；ASR 服务负责本地音频提取、分段、取消和时间轴；适配器负责网络协议差异。第三方 ASR 返回结构须归一化为带时间戳的 `segments`，之后由公共时间轴校验处理。
-- `test/provider-integration.test.ts` 使用自定义协议验证同一个新注册的 Provider 同时驱动翻译和 ASR，无需更改播放器。
-
-## 国际化（i18n）
-
-「设置 → 通用」中的语言选择器支持 **简体中文（zh-CN）** 和 **English（en）**。首次使用根据系统语言选择，其他语言回退到简体中文；手动切换后将偏好写入应用用户数据目录的 `settings.json`，下次启动继续使用。语言偏好与保存目录一起保存，兼容已有的设置文件。
-
-- 使用 `i18next` / `react-i18next`，语言资源随应用本地打包，不依赖在线翻译服务。
-- 界面、占位符、辅助功能标签、下载状态、应用错误和原生对话框均支持切换。
-- 切换语言不会清空已解析的视频、画质选择或正在执行的任务；当前状态与应用错误会立即重新翻译。
-- 视频标题、UP 主名称、路径和 yt-dlp / 操作系统返回的原始诊断信息保留原文。
-
-### 添加新语言
-
-1. 在 `src/shared/i18n/locales/` 新建语言文件，导出的词条对象使用 `satisfies MessageCatalog`（类型从 `zh-CN.ts` 导入），确保键完整。动态值使用 `{{name}}` 等插值，避免拼接翻译句子。
-2. 在 `src/shared/i18n/catalog.ts` 的 `languages` 中注册语言代码、该语言的自称和词条对象；语言选择器及共享 `Locale` 类型自动扩展。
-3. 运行 `npm run check`、`npm test`、`npm run test:desktop`，检查词条键、插值变量和实际界面布局。新增文案须同时更新所有已注册语言，缺失的运行时词条会回退到简体中文。
-
-React 组件通过 `useI18n()` 使用类型化的词条；主进程通过 `translate()` 翻译原生对话框。跨进程的应用错误携带词条键及插值参数，避免把已翻译的字符串固定在旧语言中。
-
-## 使用
-
-1. 粘贴 `https://www.bilibili.com/video/BV…`、`/video/av…` 或 `https://b23.tv/…` 链接，也可粘贴包含链接的分享文本。
-2. 点击「解析视频」，确认标题、UP 主、封面、时长与可用清晰度。
-3. 选择清晰度和保存位置，点击「开始下载」。默认保存到系统「下载」目录下的 `LingVoice` 文件夹。
-4. 下载完成后点击「查看文件」，在资源管理器中定位文件。
-
-- 自动下载并合并音频、视频；优先使用 MP4 容器，无法兼容时由下载组件选择 MKV。不会强制转码，因此部分 HEVC/AV1 视频需要播放器支持相应编码。
-- 进度显示的是**当前媒体流**的进度。音频和视频分开下载时，进度可能从头开始；全部合并成功后才显示完成。
-- 一次只进行一个解析或下载任务。支持取消任务；部分文件会保留，相同链接、画质、目录下重新下载可尝试续传，能否续传取决于视频源。
-- 多分 P 视频只下载链接指定的 `?p=N`，未指定时下载第 1 P；暂不提供分 P 列表选择。
-- 保存位置会记住，Cookie 选择仅在本次应用会话有效。
-
-## 登录和隐私
-
-公开内容通常可直接解析；平台可能对匿名用户限制画质或触发风控。你可在「登录选项」里选择自己账号导出的 **Netscape 格式 `.txt` Cookie 文件**，仅用于账号本身已经拥有访问权限的内容。没有 Cookie 时不会自动读取浏览器登录信息。
-
-Cookie 等同账号凭证，请自行评估导出工具的可信度，并妥善保管，勿上传、分享或提交到版本库。文件路径仅保存在应用当前内存中，yt-dlp 在本机读取文件，也可能刷新、写回原 Cookie 文件。请求会连接 B 站及其视频、图片服务器；首次准备组件会连接 GitHub。应用没有自建上传服务器、遥测或账号系统。
-
-本软件不绕过付费、会员、版权、地区限制或数字版权管理（DRM）。请仅下载你拥有版权或已获授权的内容，并遵守平台服务条款。
-
-## 当前范围
-
-- 适配 Windows x64；尚未验证 ARM64。
-- 支持普通 B 站投稿链接和短链接。
-- 暂不支持批量队列、合集、番剧、直播、平台字幕自动提取和弹幕；本地视频支持字幕导入、云端 ASR 与字幕翻译。
-- 实际能否下载以及可用画质受平台接口、网络、账号权限和 yt-dlp 适配状况影响。
-- 页面或接口变更后，可关闭应用，删除用户数据目录中的 `tools/yt-dlp.exe`，下次解析时重新获取官方最新版。
-
-## 测试与打包
+启动本地 Node 后端服务与浏览器界面，直接复用真实的下载、识别、翻译、配音与 SQLite 存储能力：
 
 ```powershell
-npm run check        # 主进程、共享类型、React、测试与工具脚本的严格 TypeScript 类型检查
-npm test             # 下载核心与前端格式化函数的离线自动化测试
-npm run build        # 编译 TypeScript 并构建 React 前端到 dist
-npm run test:desktop # 真实桌面、隔离通信、React 交互和错误恢复；请先关闭已启动的应用
-npm run dist         # 构建并在 release 中生成 Windows 便携版 exe
-npm run icon         # 从现有 SVG 重新生成 Windows 图标
+npm run web
 ```
 
-桌面测试会在 `artifacts/desktop.png` 和 `artifacts/desktop-en.png` 保存中英文界面截图，并使用临时用户数据目录，避免改变你实际保存的语言与目录偏好。它既验证真实主进程的链接校验与错误恢复，也使用独立的离线测试窗口验证 React 视频预览、清晰度选择、下载进度、完成、取消与 Cookie 切换后的状态重置，以及语言切换、持久化与界面重载恢复。测试不会连接 B 站或下载视频，不能代替真实链接的端到端下载验证。测试脚本与模拟接口不会打包进发布程序。
+### 3. 生产构建启动或快捷脚本
 
-便携版不需要安装 Node.js，但第一次使用仍需联网获取 yt-dlp。当前打包未配置代码签名，Windows 可能显示未知发布者提示。分发包含 FFmpeg 的软件前，请核对 FFmpeg 构建的 GPL 授权及源码提供义务；本项目尚未配置正式发布许可或完成发行合规准备。
+```powershell
+# 编译前后端产物并以生产模式启动
+npm start
+```
 
-## 文件结构
+也可直接双击根目录下的 `启动下载器.bat` 快速启动。
 
-- `src/main/index.ts`：Electron 主进程、原生对话框与类型化 IPC 接口。
-- `src/main/downloader.ts`：链接校验、组件准备、yt-dlp 子进程与下载管理。
-- `src/main/preload.ts`：隔离的类型化界面接口，不向页面暴露 Node.js。
-- `src/shared/contracts.ts`：前后端共享的请求、返回值与事件类型。
-- `src/shared/dev-server.ts`：Vite 开发服务器的主机名与端口，`npm run dev` 和 `npm run web` 共用。
-- `src/shared/i18n/`：共享语言注册表、中英文词条、主进程翻译及可本地化错误。
-- `src/main/history.ts`：SQLite 任务存储、事务、数据校验与上次任务选择。
-- `src/shared/history.ts`：共享任务、字幕快照与历史列表类型。
-- `src/renderer/utils/task-history.ts`：历史接口调用与旧 IndexedDB 迁移。
-- `src/main/settings.ts`：保存目录与语言偏好的串行、原子持久化。
-- `src/renderer/i18n.ts`：React 国际化实例与类型化 `useI18n()` Hook。
-- `src/renderer/web-mock.ts`：浏览器到本地 Web 服务的真实接口桥接，仅开发环境且没有预加载脚本时加载。
-- `src/renderer/components/LanguageSwitcher.tsx`：语言切换入口。
-- `src/renderer/App.tsx`、`components/`：React 主界面与组件。
-- `src/renderer/hooks/useDownloader.ts`：解析、下载、进度、取消等 React 状态管理。
-- `src/renderer/utils/format.ts`：前端时长与文件大小格式化。
-- `src/styles.css`：桌面界面样式。
-- `test/*.test.ts`：TypeScript 离线测试。
-- `scripts/smoke.ts`、`scripts/fixture-preload.ts`：桌面集成测试及独立测试接口。
-- `vite.config.ts`：React 开发服务器、构建与内容安全策略配置。
-- `tsconfig.electron.json`、`tsconfig.renderer.json`：主进程及前端 TypeScript 严格模式配置。
-- `dist/`：自动生成的编译产物，请修改 `src/` 而非该目录。
+---
+
+## 本地 AI 插件
+
+`plugins/` 目录提供了与系统 Python 完全隔离的本地模型运行环境（基于独立 `.venv` 与 `uv` 运行时），均绑定至 `127.0.0.1` 本地回环端口：
+
+| 服务模块 | 默认端口 | 核心模型 | 用途说明 |
+| :--- | :--- | :--- | :--- |
+| `asr` | `9871` | Qwen3-ASR-1.7B + ForcedAligner-0.6B | 本地语音识别与词级强制对齐 |
+| `translation` | `9872` | Gemma 4 E2B (NF4 4-bit) | 本地字幕校对与多语言翻译 |
+| `voice-clone` | `9873` | GPT-SoVITS V5 (`v5turbo`) | 本地参考音频零样本音色克隆 |
+| `separation` | 按需调用 | BS-RoFormer (`karaoke_bs_roformer`) | 对白与背景伴奏双轨无损分离 |
+
+在项目根目录的 PowerShell 中通过统一管理入口准备与启停服务：
+
+```powershell
+# 1. 初始化受校验的运行时并安装各插件独立环境
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action bootstrap
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action install
+
+# 2. 下载并校验官方模型权重（支持断点续传）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action download
+
+# 3. 检查环境与权重就绪状态 / 启停指定服务（以 translation 为例）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action start -Service translation
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action stop -Service translation
+```
+
+更多显存调度（8 GB 显存分阶段执行与 `gpu_lease.py` 跨进程互斥）、离线分离参数及接口细节，请参阅 [`plugins/README.md`](plugins/README.md) 与 [`docs/dubbing-local-setup.md`](docs/dubbing-local-setup.md)。
+
+---
+
+## 项目构建与测试
+
+```powershell
+# 主进程、共享类型、React 与工具脚本的严格 TypeScript 检查
+npm run check
+
+# 运行核心模块离线自动化测试
+npm test
+
+# 运行桌面集成测试（自动生成中英文截图至 artifacts/，请先关闭已运行的应用）
+npm run test:desktop
+
+# 构建产物并在 release/ 生成 Windows NSIS 安装包
+npm run dist
+```
+
+安装包输出路径：`release/LingVoice-Setup-${version}.exe`
+
+---
+
+## 安全与存储机制
+
+- **凭据硬件级加密** &mdash; 各服务商 API Key 经 Electron `safeStorage`（Windows DPAPI）加密保存于用户数据目录的 `providers.json`，渲染进程无法直接读取原始密钥或密文。
+- **Cookie 仅存内存** &mdash; 导入的 Netscape Cookie 文件路径仅保留在当前会话内存中，不上传至任何第三方服务器或自建遥测服务。
+- **纯本地数据闭环** &mdash; 任务、字幕与配置均保存在本地 SQLite 数据库（桌面版位于 `userData/history.sqlite`，Web 版位于 `~/.lingvoice/web/history.sqlite`），不依赖云端账号同步。
+- **本地插件通信隔离** &mdash; 本地 AI 服务仅监听 `127.0.0.1`，关键 POST 接口强制校验动态生成的 `Bearer Token` 并拒绝携带跨域 `Origin` 的浏览器请求。
+- **原子化媒体产出** &mdash; 音频提取、分离、对齐与混音均在私有暂存区完成，校验通过后通过硬链接原子发布，任务取消或失败绝不残留半成品覆盖原文件。
+
+---
+
+## 免责声明
+
+本项目为第三方开源桌面原型，非哔哩哔哩官方产品，亦不绕过付费、会员、版权、地区限制或数字版权管理（DRM）。请仅对拥有合法版权或已获明确授权的音视频执行下载、识别与声音克隆操作，并遵守相关平台服务条款及模型权重许可协议。
+
+调用远程 ASR、翻译或 TTS（如阿里百炼 Token Plan）接口前请确认服务商计费规则。此外，当前打包配置尚未完成代码签名与随包 FFmpeg 的 GPL 分发合规流程，请勿在未核查授权义务前直接对外公开分发构建产物。
