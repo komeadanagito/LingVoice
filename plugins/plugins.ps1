@@ -1,6 +1,7 @@
 param(
     [ValidateSet('bootstrap','install','download','check','start','stop','status')][string]$Action = 'check',
     [ValidateSet('all','asr','translation','voice-clone')][string]$Service = 'all',
+    [ValidateSet('modelscope','huggingface')][string]$Source = 'modelscope',
     [switch]$NoModels
 )
 $ErrorActionPreference = 'Stop'
@@ -15,9 +16,13 @@ $env:PYTHONHOME = $null
 $env:PYTHONNOUSERSITE = '1'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+if ($Source -eq 'modelscope') {
+    $env:UV_PYTHON_INSTALL_MIRROR = 'https://registry.npmmirror.com/-/binary/python-build-standalone'
+    $env:UV_DEFAULT_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
+}
 $services = if ($Service -eq 'all') { @('asr','translation','voice-clone') } else { @($Service) }
 if ($Action -eq 'bootstrap' -or $Action -eq 'install') {
-    & (Join-Path $root 'bootstrap.ps1')
+    & (Join-Path $root 'bootstrap.ps1') -Source $Source
     if (!$?) { throw 'Bootstrap failed.' }
     & $uv pip install --python $installer 'huggingface-hub==1.33.0' 'psutil==7.2.2'
     if ($LASTEXITCODE -ne 0) { throw 'Installer dependencies failed.' }
@@ -37,15 +42,15 @@ switch ($Action) {
     }
     'download' {
         if ($Service -in @('all','asr','translation')) {
-            $models = switch ($Service) { 'all' { @('qwen-asr','qwen-aligner','gemma-e2b') } 'asr' { @('qwen-asr','qwen-aligner') } 'translation' { @('gemma-e2b') } }
+            $models = switch ($Service) { 'all' { @('qwen-asr','qwen-aligner','gemma-e2b','separation') } 'asr' { @('qwen-asr','qwen-aligner') } 'translation' { @('gemma-e2b') } }
             foreach ($model in $models) {
-                & $installer (Join-Path $root 'download_models.py') --model $model
+                & $installer (Join-Path $root 'download_models.py') --model $model --source $Source
                 if ($LASTEXITCODE -ne 0) { throw "Download failed: $model" }
             }
         }
         if ($Service -in @('all','voice-clone')) {
             $voicePython = Join-Path $root 'voice-clone/.venv/Scripts/python.exe'
-            & $voicePython (Join-Path $root 'voice-clone/prepare_models.py')
+            & $voicePython (Join-Path $root 'voice-clone/prepare_models.py') --source $Source
             if ($LASTEXITCODE -ne 0) { throw 'Voice model download failed.' }
         }
     }

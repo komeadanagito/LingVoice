@@ -89,9 +89,24 @@ def download(item, download_source='modelscope'):
     else:
         url = f'https://huggingface.co/{item["repo"]}/resolve/{item["revision"]}/{item["source"]}'
     print(f'DOWNLOAD {item["source"]} {item["bytes"]}', flush=True)
-    subprocess.run(['curl.exe', '--fail', '--location', '--retry', '6', '--retry-all-errors',
-                    '--connect-timeout', '45', '--continue-at', '-', '--silent', '--show-error',
-                    '--output', str(partial), url], check=True)
+    candidates = [url]
+    if url.startswith('https://raw.githubusercontent.com/nltk/nltk_data/'):
+        rest = url[len('https://raw.githubusercontent.com/nltk/nltk_data/'):]
+        rev, _, rel = rest.partition('/')
+        cdn_url = f'https://cdn.jsdelivr.net/gh/nltk/nltk_data@{rev}/{rel}'
+        candidates = [cdn_url, url] if download_source == 'modelscope' else [url, cdn_url]
+    last_err = None
+    for candidate in candidates:
+        try:
+            subprocess.run(['curl.exe', '--fail', '--location', '--retry', '4', '--retry-all-errors',
+                            '--connect-timeout', '30', '--continue-at', '-', '--silent', '--show-error',
+                            '--output', str(partial), candidate], check=True)
+            last_err = None
+            break
+        except Exception as exc:
+            last_err = exc
+    if last_err is not None:
+        raise last_err
     if partial.stat().st_size != item['bytes']:
         raise RuntimeError(f'Incorrect size: {path}')
     sha, git = hashes(partial)

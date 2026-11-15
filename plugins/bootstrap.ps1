@@ -1,4 +1,7 @@
-param([switch]$SkipPython)
+param(
+    [switch]$SkipPython,
+    [ValidateSet('modelscope', 'huggingface')][string]$Source = 'modelscope'
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $runtime = Join-Path $root 'runtime'
@@ -13,6 +16,10 @@ $env:PYTHONPATH = $null
 $env:PYTHONHOME = $null
 $env:TEMP = Join-Path $runtime 'tmp'
 $env:TMP = $env:TEMP
+if ($Source -eq 'modelscope') {
+    $env:UV_PYTHON_INSTALL_MIRROR = 'https://registry.npmmirror.com/-/binary/python-build-standalone'
+    $env:UV_DEFAULT_INDEX = 'https://mirrors.aliyun.com/pypi/simple/'
+}
 [IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
 $uv = Join-Path $tools 'uv.exe'
 if (!(Test-Path $uv)) {
@@ -20,16 +27,58 @@ if (!(Test-Path $uv)) {
     $name = 'uv-x86_64-pc-windows-msvc.zip'
     $url = "https://github.com/astral-sh/uv/releases/download/$version/$name"
     $zip = Join-Path $tools $name
-    & curl.exe --fail --location --retry 4 --output $zip $url
-    if ($LASTEXITCODE -ne 0) { throw 'uv download failed.' }
-    $checksumFile = "$zip.sha256"
-    & curl.exe --fail --location --retry 4 --output $checksumFile "$url.sha256"
-    if ($LASTEXITCODE -ne 0) { throw 'uv checksum download failed.' }
-    $expected = ((Get-Content $checksumFile -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-    if ($expected -notmatch '^[a-f0-9]{64}$' -or $actual -ne $expected) { throw 'uv SHA256 mismatch.' }
-    Expand-Archive -LiteralPath $zip -DestinationPath $tools -Force
-    @{tag=$version;url=$url;sha256=$actual} | ConvertTo-Json | Set-Content (Join-Path $tools 'source.json') -Encoding UTF8
+    $downloadedFromGithub = $false
+    if ($Source -ne 'modelscope') {
+        & curl.exe --fail --location --retry 3 --connect-timeout 20 --output $zip $url
+        if ($LASTEXITCODE -eq 0) {
+            $checksumFile = "$zip.sha256"
+            & curl.exe --fail --location --retry 3 --connect-timeout 20 --output $checksumFile "$url.sha256"
+            if ($LASTEXITCODE -eq 0) {
+                $expected = ((Get-Content $checksumFile -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+                $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+                if ($expected -match '^[a-f0-9]{64}$' -and $actual -eq $expected) {
+                    Expand-Archive -LiteralPath $zip -DestinationPath $tools -Force
+                    @{tag=$version;url=$url;sha256=$actual} | ConvertTo-Json | Set-Content (Join-Path $tools 'source.json') -Encoding UTF8
+                    $downloadedFromGithub = $true
+                }
+            }
+        }
+    }
+    if (!$downloadedFromGithub) {
+        # Fallback: download the official uv wheel from Aliyun/Tsinghua PyPI mirror and extract uv.exe.
+        $wheelUrl = $null
+        $wheelSha = $null
+        foreach ($indexBase in @('https://mirrors.aliyun.com/pypi/simple/uv/', 'https://pypi.tuna.tsinghua.edu.cn/simple/uv/', 'https://pypi.org/simple/uv/')) {
+            try {
+                $html = (Invoke-WebRequest -Uri $indexBase -UseBasicParsing -TimeoutSec 20).Content
+                $match = [regex]::Match($html, 'href="([^"]*uv-0\.[0-9.]+-py3-none-win_amd64\.whl)(?:#sha256=([a-f0-9]{64}))?"')
+                if (!$match.Success) {
+                    $matches = [regex]::Matches($html, 'href="([^"]*uv-[^"]*-py3-none-win_amd64\.whl)(?:#sha256=([a-f0-9]{64}))?"')
+                    if ($matches.Count -gt 0) { $match = $matches[$matches.Count - 1] }
+                }
+                if ($match.Success) {
+                    $rawHref = $match.Groups[1].Value
+                    $wheelUrl = if ($rawHref -match '^https?://') { $rawHref } else { ([Uri]::new([Uri]$indexBase, $rawHref)).AbsoluteUri }
+                    if ($match.Groups[2].Success) { $wheelSha = $match.Groups[2].Value.ToLowerInvariant() }
+                    break
+                }
+            } catch {}
+        }
+        if (!$wheelUrl) { throw 'uv download failed (neither GitHub nor PyPI mirror is reachable).' }
+        $whl = Join-Path $tools 'uv-win_amd64.whl.zip'
+        & curl.exe --fail --location --retry 4 --connect-timeout 30 --output $whl $wheelUrl
+        if ($LASTEXITCODE -ne 0) { throw 'uv wheel download failed.' }
+        $actual = (Get-FileHash -Algorithm SHA256 $whl).Hash.ToLowerInvariant()
+        if ($wheelSha -and $actual -ne $wheelSha) { throw 'uv wheel SHA256 mismatch.' }
+        $extractDir = Join-Path $tools '_whl_extract'
+        if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+        Expand-Archive -LiteralPath $whl -DestinationPath $extractDir -Force
+        $foundUv = Get-ChildItem -Path $extractDir -Filter 'uv.exe' -Recurse | Select-Object -First 1
+        if (!$foundUv) { throw 'uv.exe missing inside downloaded wheel.' }
+        Copy-Item -LiteralPath $foundUv.FullName -Destination $uv -Force
+        Remove-Item -Recurse -Force $extractDir, $whl -ErrorAction SilentlyContinue
+        @{tag='pypi-wheel';url=$wheelUrl;sha256=$actual} | ConvertTo-Json | Set-Content (Join-Path $tools 'source.json') -Encoding UTF8
+    }
 }
 & $uv --version
 if ($LASTEXITCODE -ne 0) { throw 'uv executable failed.' }

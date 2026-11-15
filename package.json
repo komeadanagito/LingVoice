@@ -60,6 +60,7 @@
     "extraResources": [
       { "from": "scripts/audio-separation.py", "to": "audio-separation.py" },
       { "from": "scripts/roformer-separation.py", "to": "roformer-separation.py" },
+      { "from": "plugins/runtime/tools/uv.exe", "to": "plugins/runtime/tools/uv.exe" },
       {
         "from": "plugins",
         "to": "plugins",

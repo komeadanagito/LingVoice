@@ -680,12 +680,16 @@ export class LocalPluginManager {
           return;
         }
         if (code === 0) resolve();
-        else reject(new Error(tail.slice(-3).join(' | ') || `下载命令退出码 ${code}`));
+        else {
+          const cleanTail = tail.filter(l => !/^(\+\s*~+|At\s+.+:\d+\s+char:|所在位置\s+|标记:|CategoryInfo\s*:|FullyQualifiedErrorId\s*:)/i.test(l));
+          const summary = (cleanTail.length ? cleanTail : tail).slice(-3).join(' | ');
+          reject(new Error(summary || `下载命令退出码 ${code}`));
+        }
       });
     });
   }
 
-  private async ensureDownloadEnvironment(target: LocalEngineDownloadTarget): Promise<void> {
+  private async ensureDownloadEnvironment(target: LocalEngineDownloadTarget, source: ModelDownloadSource): Promise<void> {
     const servicesToInstall: LocalPluginId[] = [];
     if ((target === 'all' || target === 'asr') && !await isServiceDepsReady(this.pluginsDir, 'asr')) {
       servicesToInstall.push('asr');
@@ -708,7 +712,7 @@ export class LocalPluginManager {
       this.emitDownload({ stage: 'bootstrap', message: '正在初始化内置 Python 下载环境…', percent: null });
       await this.runDownloadCommand(
         'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'bootstrap'],
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'bootstrap', '-Source', source],
         this.pluginsDir,
         line => this.emitDownload({ message: line }),
       );
@@ -718,7 +722,7 @@ export class LocalPluginManager {
       this.emitDownload({ stage: 'bootstrap', message: `正在安装 ${svc} 本地运行环境…`, percent: null });
       await this.runDownloadCommand(
         'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'install', '-Service', svc, '-NoModels'],
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScript, '-Action', 'install', '-Service', svc, '-Source', source, '-NoModels'],
         this.pluginsDir,
         line => this.emitDownload({ message: line }),
       );
@@ -754,7 +758,7 @@ export class LocalPluginManager {
 
     void (async () => {
       try {
-        await this.ensureDownloadEnvironment(request.target);
+        await this.ensureDownloadEnvironment(request.target, request.source);
         const installerPy = pythonExecutable(path.join(this.pluginsDir, 'installer'));
         const downloadScript = path.join(this.pluginsDir, 'download_models.py');
         const modelSteps: Array<'qwen-asr' | 'qwen-aligner' | 'gemma-e2b' | 'separation'> = [];

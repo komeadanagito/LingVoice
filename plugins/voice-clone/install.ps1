@@ -14,14 +14,40 @@ $env:PYTHONHOME = $null
 [IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
 $upstream = Join-Path $root 'upstream'
 $revision = 'e91506f1fba265e1841617c3042a1573206a7351'
-if (!(Test-Path (Join-Path $upstream '.git'))) {
-  & git clone --filter=blob:none --no-checkout https://github.com/RVC-Boss/GPT-SoVITS.git $upstream
-  if ($LASTEXITCODE -ne 0) { throw 'Official source clone failed.' }
-  & git -C $upstream checkout $revision
-  if ($LASTEXITCODE -ne 0) { throw 'Pinned checkout failed.' }
+if (!(Test-Path (Join-Path $upstream 'tools/uvr5/bsroformer.py'))) {
+  if (Test-Path $upstream) { Remove-Item -Recurse -Force $upstream -ErrorAction SilentlyContinue }
+  $cloned = $false
+  $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+  if ($gitCmd) {
+    try {
+      & git clone --filter=blob:none --no-checkout https://github.com/RVC-Boss/GPT-SoVITS.git $upstream
+      if ($LASTEXITCODE -eq 0) {
+        & git -C $upstream checkout $revision
+        if ($LASTEXITCODE -eq 0) { $cloned = $true }
+      }
+    } catch {}
+  }
+  if (!$cloned) {
+    if (Test-Path $upstream) { Remove-Item -Recurse -Force $upstream -ErrorAction SilentlyContinue }
+    $archiveZip = Join-Path $env:TEMP "GPT-SoVITS-$revision.zip"
+    $extractTmp = Join-Path $env:TEMP "GPT-SoVITS-extract-$revision"
+    if (Test-Path $extractTmp) { Remove-Item -Recurse -Force $extractTmp }
+    & curl.exe --fail --location --retry 4 --connect-timeout 30 --output $archiveZip "https://github.com/RVC-Boss/GPT-SoVITS/archive/$revision.zip"
+    if ($LASTEXITCODE -ne 0) { throw 'Official GPT-SoVITS source download failed.' }
+    Expand-Archive -LiteralPath $archiveZip -DestinationPath $extractTmp -Force
+    $inner = Get-ChildItem -Path $extractTmp -Directory | Select-Object -First 1
+    if (!$inner) { throw 'Extracted GPT-SoVITS source archive is empty.' }
+    Move-Item -LiteralPath $inner.FullName -Destination $upstream
+    Remove-Item -Force $archiveZip -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $extractTmp -ErrorAction SilentlyContinue
+  }
 }
-$actual = & git -C $upstream rev-parse HEAD
-if ($actual -ne $revision) { throw 'Upstream revision mismatch; refusing a silent model/API change.' }
+if (Test-Path (Join-Path $upstream '.git')) {
+  $actual = & git -C $upstream rev-parse HEAD
+  if ($actual -ne $revision) { throw 'Upstream revision mismatch; refusing a silent model/API change.' }
+} elseif (!(Test-Path (Join-Path $upstream 'tools/uvr5/bsroformer.py'))) {
+  throw 'Upstream GPT-SoVITS source is incomplete.'
+}
 & $uv pip install --python $python --index-url https://download.pytorch.org/whl/cu126 'torch==2.6.0+cu126' 'torchaudio==2.6.0+cu126'
 if ($LASTEXITCODE -ne 0) { throw 'PyTorch CUDA wheels installation failed.' }
 $lock = Join-Path $root 'requirements.lock'
