@@ -16,6 +16,8 @@ video/
 __pycache__/
 *.py[cod]
 scripts/diag_*.ts
+.agents/skills/
+docs/
 
 # Local model plugins: keep scripts/configuration, exclude machine-specific artifacts.
 plugins/runtime/

@@ -102,7 +102,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Actio
 powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\plugins.ps1 -Action stop -Service translation
 ```
 
-更多显存调度（8 GB 显存分阶段执行与 `gpu_lease.py` 跨进程互斥）、离线分离参数及接口细节，请参阅 [`plugins/README.md`](plugins/README.md) 与 [`docs/dubbing-local-setup.md`](docs/dubbing-local-setup.md)。
+更多显存调度（8 GB 显存分阶段执行与 `gpu_lease.py` 跨进程互斥）、离线分离参数及接口细节，请参阅 [`plugins/README.md`](plugins/README.md)。
 
 ---
 
