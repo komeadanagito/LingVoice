@@ -1,7 +1,7 @@
 export const zhCN = {
-  'app.title': '另一声 · 视频下载',
-  'app.brand': '另一声',
-  'app.logoAlt': '另一声百灵鸟标志',
+  'app.title': '百语鸟 · 视频下载',
+  'app.brand': '百语鸟',
+  'app.logoAlt': '百语鸟百灵鸟标志',
   'nav.settings': '设置',
   'nav.navigation': '主导航',
   'nav.collapseSidebar': '收起侧边栏',
