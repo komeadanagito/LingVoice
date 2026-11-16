@@ -1,8 +1,8 @@
 <div align="center">
 
-  <img src="icon/lingvoice-logo.svg" width="96" height="96" alt="LingVoice 另一声" style="border-radius: 20px; margin-bottom: 12px;" />
+  <img src="icon/lingvoice-logo.svg" width="96" height="96" alt="LingVoice 百语鸟" style="border-radius: 20px; margin-bottom: 12px;" />
 
-  # 另一声 · LingVoice
+  # 百语鸟 · LingVoice
 
   **集 B 站视频解析下载、AI 语音识别、双语字幕翻译与声音克隆配音于一体的桌面工作台**
 
@@ -27,7 +27,7 @@
 
 <div align="center">
   <p align="center"><b>☀️ 工作台预览</b></p>
-  <img src="image/image.png" alt="LingVoice 另一声桌面工作台预览" width="880" style="border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); margin: 8px 0 24px 0;" />
+  <img src="image/image.png" alt="LingVoice 百语鸟桌面工作台预览" width="880" style="border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); margin: 8px 0 24px 0;" />
 </div>
 
 ---

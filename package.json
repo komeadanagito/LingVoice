@@ -5,7 +5,7 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "description": "另一声",
+  "description": "百语鸟",
   "main": "dist/src/main/index.js",
   "scripts": {
     "start": "npm run build && electron .",
